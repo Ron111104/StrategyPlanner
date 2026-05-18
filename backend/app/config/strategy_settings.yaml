@@ -1,0 +1,74 @@
+# ============================================================
+# Strategy Engine Settings
+# ============================================================
+# Trader manually configures all strategy parameters here.
+# Supports indicators, risk limits, volatility thresholds,
+# regime classification, and replay settings.
+# ============================================================
+
+indicators:
+  atr_length: 14
+  ma_fast: 10
+  ma_slow: 50
+  donchian_length: 20
+  bollinger_length: 20
+  bollinger_std: 2.0
+  dcw_length: 20
+  spread_sma_length: 20
+  min_bars_required: 51
+
+risk:
+  max_risk_per_trade: 500.0
+  max_lots: 20
+  event_risk_multiplier: 0.5
+  default_slippage_ticks: 1
+  default_commission_per_lot: 2.50
+  max_daily_risk: 2500.0
+  max_open_signals: 5
+
+volatility:
+  low_vol_threshold: 0.8
+  high_vol_threshold: 1.8
+  extreme_vol_threshold: 3.0
+  vol_lookback: 20
+
+regime:
+  trend_ma_separation_threshold: 0.010
+  range_atr_percentile_threshold: 30
+  volatility_atr_multiplier: 1.5
+  event_lock_window_hours: 4
+  regime_expiration_hours: 24
+
+timeframes:
+  default: "1H"
+  allowed:
+    - "1M"
+    - "5M"
+    - "15M"
+    - "1H"
+    - "4H"
+    - "1D"
+
+replay:
+  enabled: true
+  speed_multiplier: 1.0
+  max_replay_bars: 500
+  default_start_offset_bars: 100
+
+scoring:
+  min_confidence_threshold: 0.3
+  high_confidence_threshold: 0.7
+  caution_threshold: 0.5
+  conflicting_strategy_penalty: 0.15
+
+sizing:
+  scale_in_levels: 3
+  scale_in_ratios:
+    - 0.5
+    - 0.3
+    - 0.2
+  target_levels: 3
+  target_ratios:
+    - 0.5
+    - 0.3
+    - 0.2
