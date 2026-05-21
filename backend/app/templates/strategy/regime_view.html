@@ -1,0 +1,216 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}Regime View - ZQ Strategy Planner{% endblock %}
+
+{% block content %}
+<div class="p-6 space-y-6" x-data="regimeView()">
+    <div class="flex items-center justify-between">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-100">Market Regime</h1>
+            <p class="text-gray-400 text-sm mt-1">Regime classification and macro bias management</p>
+        </div>
+    </div>
+
+    <!-- Current Regime Display -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div class="bg-[#111827] rounded-lg border border-gray-700/50 p-5 text-center">
+            <span class="text-xs text-gray-500 uppercase tracking-wider block mb-2">Current Regime</span>
+            <span class="text-3xl font-bold block mb-2"
+                :class="{
+                    'text-cyan-400': regime === 'trend',
+                    'text-amber-400': regime === 'range',
+                    'text-rose-400': regime === 'volatility',
+                    'text-purple-400': regime === 'event'
+                }"
+                x-text="regime ? regime.toUpperCase() : 'UNKNOWN'"></span>
+            <span class="text-xs text-gray-500" x-text="'Confidence: ' + (confidence * 100).toFixed(0) + '%'"></span>
+        </div>
+        <div class="bg-[#111827] rounded-lg border border-gray-700/50 p-5 text-center">
+            <span class="text-xs text-gray-500 uppercase tracking-wider block mb-2">Macro Bias</span>
+            <span class="text-3xl font-bold block mb-2"
+                :class="{
+                    'text-rose-400': bias === 'hawkish',
+                    'text-emerald-400': bias === 'dovish',
+                    'text-gray-400': bias === 'neutral'
+                }"
+                x-text="bias ? bias.toUpperCase() : 'NEUTRAL'"></span>
+            <span class="text-xs text-gray-500" x-text="source"></span>
+        </div>
+        <div class="bg-[#111827] rounded-lg border border-gray-700/50 p-5 text-center">
+            <span class="text-xs text-gray-500 uppercase tracking-wider block mb-2">Active Events</span>
+            <span class="text-3xl font-bold text-amber-400 block mb-2" x-text="activeEvents.length"></span>
+            <span class="text-xs text-gray-500" x-text="activeEvents.length > 0 ? activeEvents[0].event_name : 'None'"></span>
+        </div>
+        <div class="bg-[#111827] rounded-lg border border-gray-700/50 p-5 text-center">
+            <span class="text-xs text-gray-500 uppercase tracking-wider block mb-2">Last Updated</span>
+            <span class="text-lg font-mono text-gray-300 block mb-2" x-text="lastUpdated || '—'"></span>
+            <span class="text-xs text-gray-500" x-text="expiresAt ? 'Expires: ' + expiresAt : 'No expiry'"></span>
+        </div>
+    </div>
+
+    <!-- Manual Override Controls -->
+    <div class="bg-[#111827] rounded-lg border border-gray-700/50 p-5">
+        <h3 class="text-sm font-medium text-gray-200 mb-4">Manual Override</h3>
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5">Product</label>
+                <select x-model="selectedProduct" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm focus:ring-cyan-500 focus:border-cyan-500">
+                    {% for contract in contracts.outrights %}
+                    <option value="{{ contract.symbol }}">{{ contract.symbol }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5">Regime</label>
+                <select x-model="overrideRegime" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm focus:ring-cyan-500 focus:border-cyan-500">
+                    <option value="trend">Trend</option>
+                    <option value="range">Range</option>
+                    <option value="volatility">Volatility</option>
+                    <option value="event">Event</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5">Macro Bias</label>
+                <select x-model="overrideBias" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm focus:ring-cyan-500 focus:border-cyan-500">
+                    <option value="hawkish">Hawkish</option>
+                    <option value="dovish">Dovish</option>
+                    <option value="neutral">Neutral</option>
+                </select>
+            </div>
+            <div class="flex items-end">
+                <button @click="applyOverride()"
+                    class="w-full bg-amber-600 hover:bg-amber-500 text-white font-medium py-2 px-4 rounded-md transition-all text-sm">
+                    Apply Override
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Regime Classification Factors -->
+    <div class="bg-[#111827] rounded-lg border border-gray-700/50 p-5">
+        <h3 class="text-sm font-medium text-gray-200 mb-4">Classification Factors</h3>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div class="space-y-3">
+                <h4 class="text-xs text-gray-400 uppercase tracking-wider">Volatility Metrics</h4>
+                <div class="space-y-2">
+                    <div class="flex justify-between items-center">
+                        <span class="text-sm text-gray-400">ATR (14)</span>
+                        <span class="font-mono text-sm text-gray-200" x-text="atrValue || '—'"></span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-sm text-gray-400">ATR / SMA(ATR)</span>
+                        <span class="font-mono text-sm" :class="atrRatio > 2.0 ? 'text-rose-400' : atrRatio > 1.5 ? 'text-amber-400' : 'text-gray-200'" x-text="atrRatio ? atrRatio.toFixed(2) : '—'"></span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-sm text-gray-400">DCW</span>
+                        <span class="font-mono text-sm text-gray-200" x-text="dcwValue ? dcwValue.toFixed(4) : '—'"></span>
+                    </div>
+                </div>
+            </div>
+            <div class="space-y-3">
+                <h4 class="text-xs text-gray-400 uppercase tracking-wider">Regime Priority</h4>
+                <div class="space-y-2">
+                    <div class="flex items-center gap-3">
+                        <span class="w-3 h-3 rounded-full" :class="regime === 'event' ? 'bg-purple-500' : 'bg-gray-700'"></span>
+                        <span class="text-sm" :class="regime === 'event' ? 'text-purple-400' : 'text-gray-500'">1. Event (highest priority)</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span class="w-3 h-3 rounded-full" :class="regime === 'volatility' ? 'bg-rose-500' : 'bg-gray-700'"></span>
+                        <span class="text-sm" :class="regime === 'volatility' ? 'text-rose-400' : 'text-gray-500'">2. Volatility</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span class="w-3 h-3 rounded-full" :class="regime === 'trend' ? 'bg-cyan-500' : 'bg-gray-700'"></span>
+                        <span class="text-sm" :class="regime === 'trend' ? 'text-cyan-400' : 'text-gray-500'">3. Trend</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span class="w-3 h-3 rounded-full" :class="regime === 'range' ? 'bg-amber-500' : 'bg-gray-700'"></span>
+                        <span class="text-sm" :class="regime === 'range' ? 'text-amber-400' : 'text-gray-500'">4. Range (default)</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Event Calendar -->
+    <div class="bg-[#111827] rounded-lg border border-gray-700/50 p-5">
+        <h3 class="text-sm font-medium text-gray-200 mb-4">Macro Events</h3>
+        <div class="space-y-2">
+            <template x-for="event in activeEvents" :key="event.event_name">
+                <div class="flex items-center justify-between bg-[#1a1f2e] rounded-md p-3">
+                    <div class="flex items-center gap-3">
+                        <span class="w-2 h-2 rounded-full" :class="event.impact === 'high' ? 'bg-rose-500' : event.impact === 'medium' ? 'bg-amber-500' : 'bg-gray-500'"></span>
+                        <span class="text-sm text-gray-200" x-text="event.event_name"></span>
+                    </div>
+                    <div class="flex items-center gap-4 text-xs">
+                        <span class="text-gray-500" x-text="event.event_time"></span>
+                        <span class="px-2 py-0.5 rounded text-xs uppercase" :class="event.impact === 'high' ? 'bg-rose-500/20 text-rose-400' : event.impact === 'medium' ? 'bg-amber-500/20 text-amber-400' : 'bg-gray-500/20 text-gray-400'" x-text="event.impact"></span>
+                    </div>
+                </div>
+            </template>
+            <template x-if="activeEvents.length === 0">
+                <p class="text-gray-500 text-sm text-center py-4">No active macro events</p>
+            </template>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function regimeView() {
+    return {
+        selectedProduct: '{{ contracts.outrights[0].symbol if contracts.outrights else "" }}',
+        regime: null,
+        bias: 'neutral',
+        confidence: 0,
+        source: 'none',
+        lastUpdated: null,
+        expiresAt: null,
+        activeEvents: [],
+        overrideRegime: 'range',
+        overrideBias: 'neutral',
+        atrValue: null,
+        atrRatio: null,
+        dcwValue: null,
+
+        init() {
+            this.loadRegime();
+        },
+
+        async loadRegime() {
+            try {
+                const api = new ApiClient();
+                const data = await api.getRegime(this.selectedProduct);
+                if (data) {
+                    this.regime = data.current_regime;
+                    this.bias = data.macro_bias;
+                    this.confidence = data.confidence || 0;
+                    this.source = data.source || 'computed';
+                    this.activeEvents = data.active_events || [];
+                }
+            } catch (err) {
+                console.warn('Regime not available:', err);
+            }
+        },
+
+        async applyOverride() {
+            try {
+                const api = new ApiClient();
+                const result = await api.updateRegime(this.selectedProduct, {
+                    regime: this.overrideRegime,
+                    bias: this.overrideBias,
+                    manual_override: true
+                });
+                this.regime = result.current_regime;
+                this.bias = result.macro_bias;
+                this.confidence = result.confidence;
+                this.source = 'manual';
+                showNotification('Regime override applied', 'success');
+            } catch (err) {
+                showNotification('Failed to apply override: ' + err.message, 'error');
+            }
+        }
+    };
+}
+</script>
+{% endblock %}

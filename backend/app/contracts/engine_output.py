@@ -1,107 +1,119 @@
-"""
-Engine output contracts — strategy signals, evaluation results, and responses.
+"""Engine output contract models for ZQ Strategy Planning Platform.
 
-All strategy engine outputs are typed through these contracts.
+Defines strategy signal models, evaluation request/response schemas,
+and no-signal reason models returned by the strategy evaluation engine.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
-from typing import Any, Optional
+from enum import StrEnum
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from app.contracts.execution_inputs import LadderPlan, RiskCalcResult, ScaleLevel
+from app.contracts.execution_inputs import AccountConfig, LadderPlan
 from app.contracts.macro_inputs import MacroBias, MarketRegime, RegimeState
-from app.contracts.market_data import ContractType, Timeframe
+from app.contracts.market_data import Timeframe
 
 
-# ── Signal Direction ──────────────────────────────────────────
+class SignalDirection(StrEnum):
+    """Trade signal direction."""
 
-class SignalDirection(str, Enum):
     LONG = "long"
     SHORT = "short"
-    NEUTRAL = "neutral"
 
 
-# ── Strategy Signal ───────────────────────────────────────────
+class SignalStrength(StrEnum):
+    """Confidence-based signal strength classification."""
+
+    STRONG = "strong"
+    MODERATE = "moderate"
+    WEAK = "weak"
+
 
 class StrategySignal(BaseModel):
-    """Complete strategy signal output with all context."""
+    """A concrete trade signal produced by the strategy engine.
 
-    # ── Identity ──────────────────────────────────────────────
-    signal_id: str
-    strategy_name: str
-    product: str
-    contract_type: ContractType
-    timeframe: Timeframe
-    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    Contains the full trade plan including entry, stop, target, sizing,
+    regime context, indicators used, and optional ladder plan.
+    """
 
-    # ── Signal Core ───────────────────────────────────────────
+    strategy_name: Annotated[str, Field(min_length=1, description="Name of the strategy that generated this signal")]
+    product: Annotated[str, Field(min_length=1, description="Product symbol")]
     direction: SignalDirection
-    entry_price: float = Field(gt=0)
-    stop_price: float = Field(gt=0)
-    targets: list[float] = Field(min_length=1)
+    entry_price: Annotated[float, Field(gt=0, description="Recommended entry price")]
+    stop_price: Annotated[float, Field(gt=0, description="Recommended stop price")]
+    target_price: Annotated[float, Field(gt=0, description="Recommended target price")]
+    confidence: Annotated[float, Field(ge=0.0, le=1.0, description="Signal confidence 0-1")]
+    strength: SignalStrength
+    regime: MarketRegime
+    bias: MacroBias
+    risk_reward_ratio: Annotated[float, Field(ge=0, description="Reward-to-risk ratio")]
+    dollar_risk: Annotated[float, Field(ge=0, description="Dollar risk for this signal")]
+    position_size: Annotated[int, Field(gt=0, description="Recommended position size")]
+    timestamp: datetime
+    invalidation_conditions: list[str] = Field(
+        default_factory=list,
+        description="Conditions that would invalidate this signal",
+    )
+    notes: list[str] = Field(
+        default_factory=list,
+        description="Additional notes or context for the trader",
+    )
+    ladder: LadderPlan | None = None
+    indicators_used: dict[str, float] = Field(
+        default_factory=dict,
+        description="Indicator name -> value mapping used in signal generation",
+    )
 
-    # ── Risk Profile ─────────────────────────────────────────
-    risk_calc: RiskCalcResult
-    ladder_plan: Optional[LadderPlan] = None
+    @field_validator("confidence")
+    @classmethod
+    def clamp_confidence(cls, v: float) -> float:
+        """Clamp confidence to [0.0, 1.0]."""
+        return max(0.0, min(1.0, v))
 
-    # ── Scoring ───────────────────────────────────────────────
-    confidence_score: float = Field(ge=0, le=1.0)
-    priority: int = Field(ge=0, default=0)
-    caution_flag: bool = False
-    caution_reasons: list[str] = Field(default_factory=list)
-
-    # ── Trigger & Disable Conditions ─────────────────────────
-    trigger_conditions: list[str] = Field(default_factory=list)
-    disable_conditions_checked: list[str] = Field(default_factory=list)
-    invalidation_conditions: list[str] = Field(default_factory=list)
-
-    # ── Regime & Macro Context ────────────────────────────────
-    regime_context: RegimeState
-    macro_bias: MacroBias = MacroBias.NEUTRAL
-
-    # ── Strategy Metadata ─────────────────────────────────────
-    strategy_metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-# ── No Signal Response ────────────────────────────────────────
 
 class NoSignalResponse(BaseModel):
-    """Structured response when no signal is generated."""
-    product: str
-    timeframe: Timeframe
-    reason: str
+    """Returned when no valid signal is generated for a product.
+
+    Includes the reason why no signal was found and which strategies
+    were evaluated.
+    """
+
+    product: Annotated[str, Field(min_length=1)]
+    reason: Annotated[str, Field(min_length=1, description="Explanation of why no signal was generated")]
     regime: MarketRegime
-    macro_bias: MacroBias
-    checks_performed: list[str] = Field(default_factory=list)
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    bias: MacroBias
+    timestamp: datetime
+    strategies_evaluated: list[str] = Field(
+        default_factory=list,
+        description="List of strategy names that were evaluated",
+    )
 
-
-# ── Strategy Evaluate Request ─────────────────────────────────
 
 class StrategyEvaluateRequest(BaseModel):
-    """Request to evaluate strategies for a product."""
-    product: str = Field(min_length=1)
-    timeframe: Timeframe = Timeframe.H1
-    strategies: Optional[list[str]] = None  # None = all strategies
-    regime_override: Optional[MarketRegime] = None
-    macro_bias_override: Optional[MacroBias] = None
-    max_signals: int = Field(default=5, ge=1, le=20)
+    """Request to evaluate strategies for a given product and timeframe."""
 
+    product: Annotated[str, Field(min_length=1, description="Product symbol to evaluate")]
+    timeframe: Timeframe
+    regime_override: MarketRegime | None = None
+    bias_override: MacroBias | None = None
+    account_config: AccountConfig | None = None
 
-# ── Strategy Evaluate Response ────────────────────────────────
 
 class StrategyEvaluateResponse(BaseModel):
-    """Response from strategy evaluation containing all signals."""
-    product: str
+    """Response from the strategy evaluation engine.
+
+    Contains any generated signals, reasons for no-signals,
+    the regime state, and evaluation metadata.
+    """
+
+    product: Annotated[str, Field(min_length=1)]
     timeframe: Timeframe
-    regime: RegimeState
     signals: list[StrategySignal] = Field(default_factory=list)
     no_signal_reasons: list[NoSignalResponse] = Field(default_factory=list)
-    evaluation_time_ms: float = Field(ge=0)
-    strategies_evaluated: list[str] = Field(default_factory=list)
-    conflicting_strategies: list[str] = Field(default_factory=list)
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    regime: RegimeState
+    evaluation_time_ms: Annotated[float, Field(ge=0, description="Time taken for evaluation in milliseconds")]
+    bars_analyzed: Annotated[int, Field(ge=0, description="Number of bars analyzed")]
+    timestamp: datetime

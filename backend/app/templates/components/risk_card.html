@@ -1,0 +1,90 @@
+<!-- Risk Card Component
+  Variables:
+    - risk: object with {product, direction, entry, stop, target, contracts, dollar_risk, dollar_reward, rr_ratio, max_loss_pct, position_value}
+-->
+<div class="rounded-lg bg-[#1a1f2e] border border-gray-700/50 overflow-hidden">
+  <!-- Header -->
+  <div class="flex items-center justify-between px-3 py-2 border-b border-gray-700/30 bg-[#111827]/50">
+    <div class="flex items-center gap-2">
+      <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+      </svg>
+      <span class="text-xs font-semibold text-gray-200">Risk Profile</span>
+    </div>
+    <span class="text-[10px] font-mono text-gray-500">{{ risk.product | default("ZQM2025") }}</span>
+  </div>
+
+  <!-- Risk Details -->
+  <div class="p-3 space-y-3">
+    <!-- Direction & Contracts -->
+    <div class="flex items-center justify-between">
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold font-mono uppercase
+        {% if risk.direction == 'LONG' %}bg-emerald-400/10 text-emerald-400 ring-1 ring-emerald-400/20
+        {% elif risk.direction == 'SHORT' %}bg-rose-400/10 text-rose-400 ring-1 ring-rose-400/20
+        {% else %}bg-gray-600/20 text-gray-400{% endif %}
+      ">{{ risk.direction | default("LONG") }}</span>
+      <span class="text-xs font-mono text-gray-300">{{ risk.contracts | default(1) }} contract{{ 's' if risk.contracts|default(1)|int > 1 else '' }}</span>
+    </div>
+
+    <!-- Price Levels -->
+    <div class="grid grid-cols-3 gap-2 py-2 border-y border-gray-700/30">
+      <div class="text-center">
+        <span class="text-[10px] text-gray-500 uppercase block">Entry</span>
+        <span class="text-sm font-mono font-semibold text-gray-100">{{ risk.entry | default("95.4200") }}</span>
+      </div>
+      <div class="text-center">
+        <span class="text-[10px] text-gray-500 uppercase block">Stop</span>
+        <span class="text-sm font-mono font-semibold text-rose-400">{{ risk.stop | default("95.3900") }}</span>
+      </div>
+      <div class="text-center">
+        <span class="text-[10px] text-gray-500 uppercase block">Target</span>
+        <span class="text-sm font-mono font-semibold text-emerald-400">{{ risk.target | default("95.4800") }}</span>
+      </div>
+    </div>
+
+    <!-- Dollar Risk / Reward -->
+    <div class="space-y-1.5">
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-gray-400">Dollar Risk</span>
+        <span class="text-xs font-mono font-semibold text-rose-400">${{ risk.dollar_risk | default("125.00") }}</span>
+      </div>
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-gray-400">Dollar Reward</span>
+        <span class="text-xs font-mono font-semibold text-emerald-400">${{ risk.dollar_reward | default("250.00") }}</span>
+      </div>
+      <div class="flex items-center justify-between">
+        <span class="text-xs text-gray-400">R:R Ratio</span>
+        <span class="text-xs font-mono font-semibold
+          {% if risk.rr_ratio|default(2.0)|float >= 2.0 %}text-emerald-400
+          {% elif risk.rr_ratio|default(2.0)|float >= 1.5 %}text-amber-400
+          {% else %}text-rose-400{% endif %}
+        ">{{ risk.rr_ratio | default("2.00") }}:1</span>
+      </div>
+    </div>
+
+    <!-- Risk Bar -->
+    <div>
+      <div class="flex items-center justify-between mb-1">
+        <span class="text-[10px] text-gray-500 uppercase">Max Loss % of Account</span>
+        <span class="text-[10px] font-mono
+          {% if risk.max_loss_pct|default(1.0)|float <= 1.0 %}text-emerald-400
+          {% elif risk.max_loss_pct|default(1.0)|float <= 2.0 %}text-amber-400
+          {% else %}text-rose-400{% endif %}
+        ">{{ risk.max_loss_pct | default("1.00") }}%</span>
+      </div>
+      <div class="w-full h-1.5 bg-gray-700 rounded-full overflow-hidden">
+        <div class="h-full rounded-full transition-all
+          {% if risk.max_loss_pct|default(1.0)|float <= 1.0 %}bg-emerald-400
+          {% elif risk.max_loss_pct|default(1.0)|float <= 2.0 %}bg-amber-400
+          {% else %}bg-rose-400{% endif %}
+        " style="width: {{ [risk.max_loss_pct|default(1.0)|float * 20, 100] | min }}%"></div>
+      </div>
+    </div>
+
+    <!-- Position Value -->
+    <div class="pt-2 border-t border-gray-700/30 flex items-center justify-between">
+      <span class="text-[10px] text-gray-500 uppercase">Position Value</span>
+      <span class="text-xs font-mono font-semibold text-gray-200">${{ risk.position_value | default("397,500.00") }}</span>
+    </div>
+  </div>
+</div>

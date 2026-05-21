@@ -1,1 +1,1 @@
-# Adapters layer — external API communication and schema translation
+# backend/app/adapters/__init__.py

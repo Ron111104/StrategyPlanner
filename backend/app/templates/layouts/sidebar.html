@@ -1,0 +1,177 @@
+<!-- Sidebar Navigation -->
+<aside
+  x-data="{ currentPage: '{{ current_page | default('dashboard') }}' }"
+  :class="sidebarOpen ? 'w-56' : 'w-16'"
+  class="flex flex-col h-full bg-[#111827] border-r border-gray-700/50 transition-all duration-300 ease-in-out flex-shrink-0"
+>
+  <!-- Logo / Branding -->
+  <div class="flex items-center h-14 px-4 border-b border-gray-700/50">
+    <div class="flex items-center gap-2 min-w-0">
+      <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-400 to-blue-600 flex items-center justify-center flex-shrink-0">
+        <span class="text-white font-bold text-xs font-mono">ZQ</span>
+      </div>
+      <div x-show="sidebarOpen" x-cloak class="min-w-0">
+        <p class="text-sm font-semibold text-gray-100 truncate">Strategy Planner</p>
+        <p class="text-[10px] text-gray-500 font-mono uppercase tracking-wider">Fed Funds Futures</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toggle Button -->
+  <button
+    @click="sidebarOpen = !sidebarOpen"
+    class="flex items-center justify-center h-8 mx-2 mt-2 rounded text-gray-500 hover:text-gray-300 hover:bg-gray-700/30 transition-colors"
+  >
+    <svg x-show="sidebarOpen" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+    </svg>
+    <svg x-show="!sidebarOpen" x-cloak class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+    </svg>
+  </button>
+
+  <!-- Navigation -->
+  <nav class="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
+
+    <!-- Dashboard -->
+    <a
+      href="/dashboard"
+      @click="currentPage = 'dashboard'"
+      :class="currentPage === 'dashboard' ? 'bg-cyan-400/10 text-cyan-400 border-l-2 border-cyan-400' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/30 border-l-2 border-transparent'"
+      class="flex items-center gap-3 px-3 py-2 rounded-r-lg text-sm font-medium transition-all duration-150"
+    >
+      <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" />
+      </svg>
+      <span x-show="sidebarOpen" class="truncate">Dashboard</span>
+    </a>
+
+    <!-- Strategy -->
+    <a
+      href="/strategy/evaluator"
+      @click="currentPage = 'strategy'"
+      :class="currentPage === 'strategy' ? 'bg-cyan-400/10 text-cyan-400 border-l-2 border-cyan-400' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/30 border-l-2 border-transparent'"
+      class="flex items-center gap-3 px-3 py-2 rounded-r-lg text-sm font-medium transition-all duration-150"
+    >
+      <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+      </svg>
+      <span x-show="sidebarOpen" class="truncate">Strategy</span>
+    </a>
+
+    <!-- Spread Analysis -->
+    <a
+      href="/strategy/spread-analysis"
+      @click="currentPage = 'spread'"
+      :class="currentPage === 'spread' ? 'bg-cyan-400/10 text-cyan-400 border-l-2 border-cyan-400' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/30 border-l-2 border-transparent'"
+      class="flex items-center gap-3 px-3 py-2 rounded-r-lg text-sm font-medium transition-all duration-150"
+    >
+      <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" />
+      </svg>
+      <span x-show="sidebarOpen" class="truncate">Spread Analysis</span>
+    </a>
+
+    <!-- Regime -->
+    <a
+      href="/strategy/regime"
+      @click="currentPage = 'regime'"
+      :class="currentPage === 'regime' ? 'bg-cyan-400/10 text-cyan-400 border-l-2 border-cyan-400' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/30 border-l-2 border-transparent'"
+      class="flex items-center gap-3 px-3 py-2 rounded-r-lg text-sm font-medium transition-all duration-150"
+    >
+      <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+      </svg>
+      <span x-show="sidebarOpen" class="truncate">Regime</span>
+    </a>
+
+    <div class="h-px bg-gray-700/50 mx-2 my-2"></div>
+
+    <!-- Risk / Ladder -->
+    <a
+      href="/risk/ladder"
+      @click="currentPage = 'risk'"
+      :class="currentPage === 'risk' ? 'bg-cyan-400/10 text-cyan-400 border-l-2 border-cyan-400' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/30 border-l-2 border-transparent'"
+      class="flex items-center gap-3 px-3 py-2 rounded-r-lg text-sm font-medium transition-all duration-150"
+    >
+      <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15.75 15.75V18m-7.5-6.75V18m15-8.25l-8.25 8.25-4.5-4.5L2.25 21.75" />
+      </svg>
+      <span x-show="sidebarOpen" class="truncate">Risk / Ladder</span>
+    </a>
+
+    <!-- Position Sizing -->
+    <a
+      href="/risk/sizing"
+      @click="currentPage = 'sizing'"
+      :class="currentPage === 'sizing' ? 'bg-cyan-400/10 text-cyan-400 border-l-2 border-cyan-400' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/30 border-l-2 border-transparent'"
+      class="flex items-center gap-3 px-3 py-2 rounded-r-lg text-sm font-medium transition-all duration-150"
+    >
+      <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 3v17.25m0 0c-1.472 0-2.882.265-4.185.75M12 20.25c1.472 0 2.882.265 4.185.75M18.75 4.97A48.416 48.416 0 0012 4.5c-2.291 0-4.545.16-6.75.47m13.5 0c1.01.143 2.01.317 3 .52m-3-.52l2.62 10.726c.122.499-.106 1.028-.589 1.202a5.988 5.988 0 01-2.031.352 5.988 5.988 0 01-2.031-.352c-.483-.174-.711-.703-.59-1.202L18.75 4.97zm-16.5.52c.99-.203 1.99-.377 3-.52m0 0l2.62 10.726c.122.499-.106 1.028-.589 1.202a5.989 5.989 0 01-2.031.352 5.989 5.989 0 01-2.031-.352c-.483-.174-.711-.703-.59-1.202L5.25 4.97z" />
+      </svg>
+      <span x-show="sidebarOpen" class="truncate">Sizing</span>
+    </a>
+
+    <!-- Scenarios -->
+    <a
+      href="/risk/scenarios"
+      @click="currentPage = 'scenarios'"
+      :class="currentPage === 'scenarios' ? 'bg-cyan-400/10 text-cyan-400 border-l-2 border-cyan-400' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/30 border-l-2 border-transparent'"
+      class="flex items-center gap-3 px-3 py-2 rounded-r-lg text-sm font-medium transition-all duration-150"
+    >
+      <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 5.21c.135.502-.199 1.01-.722 1.01H3.52c-.523 0-.857-.508-.722-1.01L5 14.5" />
+      </svg>
+      <span x-show="sidebarOpen" class="truncate">Scenarios</span>
+    </a>
+
+    <div class="h-px bg-gray-700/50 mx-2 my-2"></div>
+
+    <!-- Replay -->
+    <a
+      href="/replay"
+      @click="currentPage = 'replay'"
+      :class="currentPage === 'replay' ? 'bg-cyan-400/10 text-cyan-400 border-l-2 border-cyan-400' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700/30 border-l-2 border-transparent'"
+      class="flex items-center gap-3 px-3 py-2 rounded-r-lg text-sm font-medium transition-all duration-150"
+    >
+      <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z" />
+      </svg>
+      <span x-show="sidebarOpen" class="truncate">Replay</span>
+    </a>
+
+  </nav>
+
+  <!-- Regime Status Footer -->
+  <div class="px-3 py-3 border-t border-gray-700/50" x-show="sidebarOpen" x-cloak>
+    <div class="rounded-lg bg-[#1a1f2e] p-3 space-y-2">
+      <div class="flex items-center justify-between">
+        <span class="text-[10px] text-gray-500 uppercase tracking-wider font-medium">Regime</span>
+        <span class="relative flex h-2 w-2">
+          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+          <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-400"></span>
+        </span>
+      </div>
+      <p class="text-sm font-semibold text-gray-100 font-mono">{{ regime | default("NEUTRAL") }}</p>
+      <div class="flex items-center gap-1.5">
+        <span class="text-[10px] text-gray-500">Bias:</span>
+        <span class="text-[10px] font-mono
+          {% if bias == 'HAWKISH' %}text-rose-400
+          {% elif bias == 'DOVISH' %}text-emerald-400
+          {% else %}text-amber-400{% endif %}
+        ">{{ bias | default("NEUTRAL") }}</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Collapsed regime indicator -->
+  <div class="px-2 py-3 border-t border-gray-700/50" x-show="!sidebarOpen">
+    <div class="flex justify-center">
+      <span class="relative flex h-3 w-3" title="Regime: {{ regime | default('NEUTRAL') }}">
+        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+        <span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-400"></span>
+      </span>
+    </div>
+  </div>
+</aside>

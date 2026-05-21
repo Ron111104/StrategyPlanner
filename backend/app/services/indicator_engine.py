@@ -1,275 +1,408 @@
 """
-Indicator Engine — institutional-grade technical indicator computation.
+Indicator computation engine for CME Fed Funds Futures (ZQ) Strategy Planning Platform.
 
-Implements all indicators with Wilder smoothing, caching, and incremental recalculation.
-MANDATORY: ATR (Wilder), SMA, EMA, Donchian Channels, Bollinger Bands, DCW.
+Provides ATR (Wilder's smoothing), SMA, EMA, Donchian Channels,
+Bollinger Bands, and DCW calculations with caching and NumPy acceleration.
 """
-
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Optional
+import hashlib
+from typing import Any
 
 import numpy as np
+import structlog
 
-from app.contracts.market_data import OHLCVBar, SpreadBar
-from app.core.logging import get_logger
+from app.contracts.market_data import OHLCVBar, IndicatorConfig
+from app.core.exceptions import InsufficientDataError, IndicatorError
+from app.utils.math_helpers import wilder_smooth, safe_divide
 
-logger = get_logger(__name__)
-
-
-@dataclass
-class IndicatorResult:
-    """Complete indicator computation result for a bar series."""
-    product: str
-    bar_count: int
-    atr: list[float] = field(default_factory=list)
-    current_atr: float = 0.0
-    sma_fast: list[float] = field(default_factory=list)
-    sma_slow: list[float] = field(default_factory=list)
-    ema_fast: list[float] = field(default_factory=list)
-    ema_slow: list[float] = field(default_factory=list)
-    donchian_upper: list[float] = field(default_factory=list)
-    donchian_lower: list[float] = field(default_factory=list)
-    donchian_mid: list[float] = field(default_factory=list)
-    current_donchian_upper: float = 0.0
-    current_donchian_lower: float = 0.0
-    bollinger_upper: list[float] = field(default_factory=list)
-    bollinger_lower: list[float] = field(default_factory=list)
-    bollinger_mid: list[float] = field(default_factory=list)
-    dcw: list[float] = field(default_factory=list)
-    current_dcw: float = 0.0
-    spread_sma: list[float] = field(default_factory=list)
-    spread_delta: list[float] = field(default_factory=list)
-    atr_percentile: float = 0.0
-    is_valid: bool = False
-    insufficient_bars: bool = False
-    error: Optional[str] = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "product": self.product, "bar_count": self.bar_count,
-            "current_atr": self.current_atr, "atr_percentile": self.atr_percentile,
-            "current_donchian_upper": self.current_donchian_upper,
-            "current_donchian_lower": self.current_donchian_lower,
-            "current_dcw": self.current_dcw, "is_valid": self.is_valid,
-            "sma_fast_last": self.sma_fast[-1] if self.sma_fast else None,
-            "sma_slow_last": self.sma_slow[-1] if self.sma_slow else None,
-            "ema_fast_last": self.ema_fast[-1] if self.ema_fast else None,
-            "ema_slow_last": self.ema_slow[-1] if self.ema_slow else None,
-            "bollinger_upper_last": self.bollinger_upper[-1] if self.bollinger_upper else None,
-            "bollinger_lower_last": self.bollinger_lower[-1] if self.bollinger_lower else None,
-            "spread_sma_last": self.spread_sma[-1] if self.spread_sma else None,
-            "spread_delta_last": self.spread_delta[-1] if self.spread_delta else None,
-        }
+logger: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
 
 class IndicatorEngine:
-    """
-    Institutional indicator engine with caching and validation.
-    Computes all indicators from raw OHLCV bars.
-    """
+    """Computes and caches technical indicators for ZQ futures."""
 
-    def __init__(self, settings: dict[str, Any]) -> None:
-        ind = settings.get("indicators", {})
-        self._atr_length: int = ind.get("atr_length", 14)
-        self._ma_fast: int = ind.get("ma_fast", 10)
-        self._ma_slow: int = ind.get("ma_slow", 50)
-        self._donchian_length: int = ind.get("donchian_length", 20)
-        self._bollinger_length: int = ind.get("bollinger_length", 20)
-        self._bollinger_std: float = ind.get("bollinger_std", 2.0)
-        self._dcw_length: int = ind.get("dcw_length", 20)
-        self._spread_sma_length: int = ind.get("spread_sma_length", 20)
-        self._min_bars: int = ind.get("min_bars_required", 51)
-        self._cache: dict[str, IndicatorResult] = {}
-        logger.info("indicator_engine_initialized", atr_length=self._atr_length)
+    __slots__ = ("_indicator_cache",)
 
-    def compute(self, bars: list[OHLCVBar], product: str, use_cache: bool = True) -> IndicatorResult:
-        """Compute all indicators for an outright bar series."""
-        cache_key = self._cache_key(product, bars)
-        if use_cache and cache_key in self._cache:
-            return self._cache[cache_key]
+    def __init__(self) -> None:
+        # Cache keyed by (product, timeframe, indicator_name, length)
+        self._indicator_cache: dict[tuple[str, str, str, int], Any] = {}
 
-        result = IndicatorResult(product=product, bar_count=len(bars))
-        if len(bars) < self._min_bars:
-            result.insufficient_bars = True
-            result.error = f"Insufficient bars: {len(bars)} < {self._min_bars}"
-            return result
+    # ------------------------------------------------------------------
+    # Cache helpers
+    # ------------------------------------------------------------------
+    def _cache_key(
+        self,
+        product: str,
+        timeframe: str,
+        indicator: str,
+        length: int,
+    ) -> tuple[str, str, str, int]:
+        return (product, timeframe, indicator, length)
 
-        try:
-            closes = np.array([b.close for b in bars], dtype=np.float64)
-            highs = np.array([b.high for b in bars], dtype=np.float64)
-            lows = np.array([b.low for b in bars], dtype=np.float64)
+    def _put_cache(
+        self,
+        key: tuple[str, str, str, int],
+        value: Any,
+    ) -> None:
+        self._indicator_cache[key] = value
 
-            result.atr = self._compute_atr(highs, lows, closes)
-            result.current_atr = result.atr[-1] if result.atr else 0.0
+    def _get_cache(
+        self,
+        key: tuple[str, str, str, int],
+    ) -> Any | None:
+        return self._indicator_cache.get(key)
 
-            result.sma_fast = self._compute_sma(closes, self._ma_fast)
-            result.sma_slow = self._compute_sma(closes, self._ma_slow)
-            result.ema_fast = self._compute_ema(closes, self._ma_fast)
-            result.ema_slow = self._compute_ema(closes, self._ma_slow)
+    def clear_cache(self) -> None:
+        """Clear the entire indicator cache."""
+        self._indicator_cache.clear()
+        logger.info("indicator_cache_cleared")
 
-            dc_u, dc_l, dc_m = self._compute_donchian(highs, lows)
-            result.donchian_upper, result.donchian_lower, result.donchian_mid = dc_u, dc_l, dc_m
-            result.current_donchian_upper = dc_u[-1] if dc_u else 0.0
-            result.current_donchian_lower = dc_l[-1] if dc_l else 0.0
+    # ------------------------------------------------------------------
+    # ATR – Wilder's smoothing
+    # ------------------------------------------------------------------
+    def compute_atr(
+        self,
+        bars: list[OHLCVBar],
+        length: int = 14,
+    ) -> list[float]:
+        """Compute Average True Range using Wilder's smoothing.
 
-            bb_u, bb_l, bb_m = self._compute_bollinger(closes)
-            result.bollinger_upper, result.bollinger_lower, result.bollinger_mid = bb_u, bb_l, bb_m
+        Parameters
+        ----------
+        bars:
+            OHLCV bar data.  Must have at least ``length + 1`` bars
+            (we need a previous close for the first TR).
+        length:
+            Lookback period (default 14).
 
-            result.dcw = self._compute_dcw(dc_u, dc_l)
-            result.current_dcw = result.dcw[-1] if result.dcw else 0.0
+        Returns
+        -------
+        list[float]
+            ATR values aligned to *bars* – the first ``length`` entries are
+            ``float('nan')`` because the ATR is undefined until we have a full
+            window.
 
-            if result.atr:
-                valid_atr = [a for a in result.atr if a > 0]
-                if valid_atr:
-                    sorted_atr = sorted(valid_atr)
-                    rank = sum(1 for a in sorted_atr if a <= result.current_atr)
-                    result.atr_percentile = round((rank / len(sorted_atr)) * 100, 1)
+        Raises
+        ------
+        InsufficientDataError
+            If ``len(bars) < length + 1``.
+        """
+        min_required = length + 1
+        if len(bars) < min_required:
+            raise InsufficientDataError(
+                f"ATR({length}) requires at least {min_required} bars, "
+                f"got {len(bars)}"
+            )
 
-            result.is_valid = True
-        except Exception as e:
-            result.error = str(e)
-            logger.error("indicator_computation_failed", product=product, error=str(e))
+        highs = np.array([b.high for b in bars], dtype=np.float64)
+        lows = np.array([b.low for b in bars], dtype=np.float64)
+        closes = np.array([b.close for b in bars], dtype=np.float64)
 
-        self._cache[cache_key] = result
+        # True Range: max(H-L, |H-prevC|, |L-prevC|)
+        prev_closes = np.roll(closes, 1)
+        prev_closes[0] = closes[0]  # first bar: no prev close, use own close
+
+        hl = highs - lows
+        hpc = np.abs(highs - prev_closes)
+        lpc = np.abs(lows - prev_closes)
+
+        true_range = np.maximum(hl, np.maximum(hpc, lpc))
+
+        # Wilder's smoothing
+        atr_values = np.full(len(bars), np.nan, dtype=np.float64)
+        # First ATR = SMA of first *length* true ranges (indices 1..length)
+        first_atr = np.mean(true_range[1 : length + 1])
+        atr_values[length] = first_atr
+
+        for i in range(length + 1, len(bars)):
+            atr_values[i] = (
+                atr_values[i - 1] * (length - 1) + true_range[i]
+            ) / length
+
+        result = atr_values.tolist()
+        logger.debug("compute_atr_done", length=length, bar_count=len(bars))
         return result
 
-    def compute_spread_indicators(self, spread_bars: list[SpreadBar], product: str, use_cache: bool = True) -> IndicatorResult:
-        """Compute indicators for a spread bar series (basis points)."""
-        cache_key = self._cache_key(f"spread_{product}", spread_bars)
-        if use_cache and cache_key in self._cache:
-            return self._cache[cache_key]
+    # ------------------------------------------------------------------
+    # SMA
+    # ------------------------------------------------------------------
+    def compute_sma(
+        self,
+        values: list[float],
+        length: int,
+    ) -> list[float]:
+        """Simple Moving Average over *length* periods.
 
-        result = IndicatorResult(product=product, bar_count=len(spread_bars))
-        if len(spread_bars) < self._min_bars:
-            result.insufficient_bars = True
-            result.error = f"Insufficient spread bars: {len(spread_bars)} < {self._min_bars}"
-            return result
+        Returns a list of the same length as *values*; the first ``length - 1``
+        entries are ``float('nan')``.
+        """
+        if len(values) < length:
+            raise InsufficientDataError(
+                f"SMA({length}) requires at least {length} values, "
+                f"got {len(values)}"
+            )
 
-        try:
-            closes_bp = np.array([b.close_bp for b in spread_bars], dtype=np.float64)
-            highs_bp = np.array([b.high_bp for b in spread_bars], dtype=np.float64)
-            lows_bp = np.array([b.low_bp for b in spread_bars], dtype=np.float64)
+        arr = np.array(values, dtype=np.float64)
+        cumsum = np.cumsum(arr)
+        sma = np.full(len(arr), np.nan, dtype=np.float64)
+        sma[length - 1 :] = (cumsum[length - 1 :] - np.concatenate(([0.0], cumsum[: -length]))) / length
 
-            result.atr = self._compute_atr(highs_bp, lows_bp, closes_bp)
-            result.current_atr = result.atr[-1] if result.atr else 0.0
-            result.sma_fast = self._compute_sma(closes_bp, self._ma_fast)
-            result.sma_slow = self._compute_sma(closes_bp, self._ma_slow)
-
-            dc_u, dc_l, dc_m = self._compute_donchian(highs_bp, lows_bp)
-            result.donchian_upper, result.donchian_lower, result.donchian_mid = dc_u, dc_l, dc_m
-            result.current_donchian_upper = dc_u[-1] if dc_u else 0.0
-            result.current_donchian_lower = dc_l[-1] if dc_l else 0.0
-
-            result.dcw = self._compute_dcw(dc_u, dc_l)
-            result.current_dcw = result.dcw[-1] if result.dcw else 0.0
-
-            result.spread_sma = self._compute_sma(closes_bp, self._spread_sma_length)
-            if result.spread_sma:
-                result.spread_delta = [round(closes_bp[i] - result.spread_sma[i], 4) for i in range(len(result.spread_sma))]
-
-            if result.atr:
-                valid_atr = [a for a in result.atr if a > 0]
-                if valid_atr:
-                    sorted_atr = sorted(valid_atr)
-                    rank = sum(1 for a in sorted_atr if a <= result.current_atr)
-                    result.atr_percentile = round((rank / len(sorted_atr)) * 100, 1)
-
-            result.is_valid = True
-        except Exception as e:
-            result.error = str(e)
-            logger.error("spread_indicator_failed", product=product, error=str(e))
-
-        self._cache[cache_key] = result
+        result = sma.tolist()
+        logger.debug("compute_sma_done", length=length, value_count=len(values))
         return result
 
-    def invalidate_cache(self, product: Optional[str] = None) -> None:
-        if product:
-            keys = [k for k in self._cache if product in k]
-            for k in keys:
-                del self._cache[k]
-        else:
-            self._cache.clear()
+    # ------------------------------------------------------------------
+    # EMA
+    # ------------------------------------------------------------------
+    def compute_ema(
+        self,
+        values: list[float],
+        length: int,
+    ) -> list[float]:
+        """Exponential Moving Average.
 
-    # ── ATR (Wilder Smoothing) ────────────────────────────────
-    def _compute_atr(self, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray) -> list[float]:
-        """TR = max(H-L, |H-prev_close|, |L-prev_close|). ATR[i] = ((ATR[i-1]*(N-1))+TR[i])/N"""
+        Seed with SMA of first *length* values, then apply:
+            EMA_t = (value_t - EMA_{t-1}) * multiplier + EMA_{t-1}
+        """
+        if len(values) < length:
+            raise InsufficientDataError(
+                f"EMA({length}) requires at least {length} values, "
+                f"got {len(values)}"
+            )
+
+        arr = np.array(values, dtype=np.float64)
+        multiplier = 2.0 / (length + 1)
+
+        ema = np.full(len(arr), np.nan, dtype=np.float64)
+        # Seed: SMA of first *length* values
+        ema[length - 1] = np.mean(arr[:length])
+
+        for i in range(length, len(arr)):
+            ema[i] = (arr[i] - ema[i - 1]) * multiplier + ema[i - 1]
+
+        result = ema.tolist()
+        logger.debug("compute_ema_done", length=length, value_count=len(values))
+        return result
+
+    # ------------------------------------------------------------------
+    # Donchian Channels
+    # ------------------------------------------------------------------
+    def compute_donchian(
+        self,
+        bars: list[OHLCVBar],
+        length: int = 20,
+    ) -> dict[str, list[float]]:
+        """Donchian Channels: rolling max(high) / min(low) over *length*.
+
+        Returns ``{'upper': [...], 'lower': [...], 'mid': [...]}``.
+        """
+        if len(bars) < length:
+            raise InsufficientDataError(
+                f"Donchian({length}) requires at least {length} bars, "
+                f"got {len(bars)}"
+            )
+
+        highs = np.array([b.high for b in bars], dtype=np.float64)
+        lows = np.array([b.low for b in bars], dtype=np.float64)
+
+        n = len(bars)
+        upper = np.full(n, np.nan, dtype=np.float64)
+        lower = np.full(n, np.nan, dtype=np.float64)
+
+        # Use a sliding window via stride tricks for efficiency
+        for i in range(length - 1, n):
+            window_start = i - length + 1
+            upper[i] = np.max(highs[window_start : i + 1])
+            lower[i] = np.min(lows[window_start : i + 1])
+
+        mid = (upper + lower) / 2.0
+
+        result = {
+            "upper": upper.tolist(),
+            "lower": lower.tolist(),
+            "mid": mid.tolist(),
+        }
+        logger.debug("compute_donchian_done", length=length, bar_count=len(bars))
+        return result
+
+    # ------------------------------------------------------------------
+    # Bollinger Bands
+    # ------------------------------------------------------------------
+    def compute_bollinger(
+        self,
+        bars: list[OHLCVBar],
+        length: int = 20,
+        std_dev: float = 2.0,
+    ) -> dict[str, list[float]]:
+        """Bollinger Bands: SMA ± std_dev * rolling std.
+
+        Returns ``{'upper': [...], 'lower': [...], 'mid': [...]}``.
+        """
+        if len(bars) < length:
+            raise InsufficientDataError(
+                f"Bollinger({length}) requires at least {length} bars, "
+                f"got {len(bars)}"
+            )
+
+        closes = np.array([b.close for b in bars], dtype=np.float64)
+
+        sma_values = np.array(self.compute_sma(closes.tolist(), length), dtype=np.float64)
+
+        # Rolling std (population std to match typical charting convention)
         n = len(closes)
-        if n < 2:
-            return []
-        tr = np.zeros(n)
-        tr[0] = highs[0] - lows[0]
-        for i in range(1, n):
-            tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
-        period = self._atr_length
-        atr = np.zeros(n)
-        if n < period:
-            return []
-        atr[period - 1] = np.mean(tr[:period])
-        for i in range(period, n):
-            atr[i] = ((atr[i - 1] * (period - 1)) + tr[i]) / period
-        return [round(float(v), 6) for v in atr]
+        rolling_std = np.full(n, np.nan, dtype=np.float64)
+        for i in range(length - 1, n):
+            window = closes[i - length + 1 : i + 1]
+            rolling_std[i] = np.std(window, ddof=0)
 
-    # ── SMA ───────────────────────────────────────────────────
-    def _compute_sma(self, data: np.ndarray, period: int) -> list[float]:
-        if len(data) < period:
-            return []
-        sma = np.convolve(data, np.ones(period) / period, mode="valid")
-        padding = [0.0] * (period - 1)
-        return padding + [round(float(v), 6) for v in sma]
+        upper = sma_values + std_dev * rolling_std
+        lower = sma_values - std_dev * rolling_std
 
-    # ── EMA ───────────────────────────────────────────────────
-    def _compute_ema(self, data: np.ndarray, period: int) -> list[float]:
-        if len(data) < period:
-            return []
-        mult = 2.0 / (period + 1)
-        ema = np.zeros(len(data))
-        ema[period - 1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            ema[i] = (data[i] - ema[i - 1]) * mult + ema[i - 1]
-        return [round(float(v), 6) for v in ema]
+        result = {
+            "upper": upper.tolist(),
+            "lower": lower.tolist(),
+            "mid": sma_values.tolist(),
+        }
+        logger.debug(
+            "compute_bollinger_done",
+            length=length,
+            std_dev=std_dev,
+            bar_count=len(bars),
+        )
+        return result
 
-    # ── Donchian ──────────────────────────────────────────────
-    def _compute_donchian(self, highs: np.ndarray, lows: np.ndarray) -> tuple[list[float], list[float], list[float]]:
-        period = self._donchian_length
-        n = len(highs)
-        if n < period:
-            return [], [], []
-        upper, lower, mid = [], [], []
-        for i in range(n):
-            if i < period - 1:
-                upper.append(0.0); lower.append(0.0); mid.append(0.0)
+    # ------------------------------------------------------------------
+    # DCW – Donchian Channel Width
+    # ------------------------------------------------------------------
+    def compute_dcw(
+        self,
+        bars: list[OHLCVBar],
+        length: int = 20,
+    ) -> list[float]:
+        """Donchian Channel Width: (upper - lower) / mid.
+
+        Returns NaN for indices where Donchian is undefined.
+        """
+        donchian = self.compute_donchian(bars, length)
+        upper = np.array(donchian["upper"], dtype=np.float64)
+        lower = np.array(donchian["lower"], dtype=np.float64)
+        mid = np.array(donchian["mid"], dtype=np.float64)
+
+        # safe_divide at array level: where mid == 0, result is NaN
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dcw = np.where(mid != 0.0, (upper - lower) / mid, np.nan)
+
+        result = dcw.tolist()
+        logger.debug("compute_dcw_done", length=length, bar_count=len(bars))
+        return result
+
+    # ------------------------------------------------------------------
+    # compute_all – one-shot indicator computation
+    # ------------------------------------------------------------------
+    def compute_all(
+        self,
+        bars: list[OHLCVBar],
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compute all configured indicators in one pass.
+
+        Parameters
+        ----------
+        bars:
+            OHLCV bar data.
+        config:
+            Indicator configuration dict.  Recognised keys:
+            - ``atr_length`` (int, default 14)
+            - ``sma_length`` (int, default 20)
+            - ``ema_length`` (int, default 21)
+            - ``donchian_length`` (int, default 20)
+            - ``bollinger_length`` (int, default 20)
+            - ``bollinger_std`` (float, default 2.0)
+            - ``dcw_length`` (int, default 20)
+
+        Returns
+        -------
+        dict[str, Any]
+            Keyed by indicator name: ``atr``, ``sma``, ``ema``,
+            ``donchian``, ``bollinger``, ``dcw``.  Each value is the
+            respective compute_* return type.
+        """
+        atr_len: int = config.get("atr_length", 14)
+        sma_len: int = config.get("sma_length", 20)
+        ema_len: int = config.get("ema_length", 21)
+        donchian_len: int = config.get("donchian_length", 20)
+        bollinger_len: int = config.get("bollinger_length", 20)
+        bollinger_std: float = config.get("bollinger_std", 2.0)
+        dcw_len: int = config.get("dcw_length", 20)
+
+        closes = [b.close for b in bars]
+
+        results: dict[str, Any] = {}
+
+        # ATR
+        try:
+            results["atr"] = self.compute_atr(bars, atr_len)
+        except InsufficientDataError:
+            logger.warning("insufficient_data_for_atr", length=atr_len, bars=len(bars))
+            results["atr"] = []
+
+        # SMA
+        try:
+            results["sma"] = self.compute_sma(closes, sma_len)
+        except InsufficientDataError:
+            logger.warning("insufficient_data_for_sma", length=sma_len, bars=len(bars))
+            results["sma"] = []
+
+        # EMA
+        try:
+            results["ema"] = self.compute_ema(closes, ema_len)
+        except InsufficientDataError:
+            logger.warning("insufficient_data_for_ema", length=ema_len, bars=len(bars))
+            results["ema"] = []
+
+        # Donchian
+        try:
+            results["donchian"] = self.compute_donchian(bars, donchian_len)
+        except InsufficientDataError:
+            logger.warning(
+                "insufficient_data_for_donchian",
+                length=donchian_len,
+                bars=len(bars),
+            )
+            results["donchian"] = {"upper": [], "lower": [], "mid": []}
+
+        # Bollinger
+        try:
+            results["bollinger"] = self.compute_bollinger(bars, bollinger_len, bollinger_std)
+        except InsufficientDataError:
+            logger.warning(
+                "insufficient_data_for_bollinger",
+                length=bollinger_len,
+                bars=len(bars),
+            )
+            results["bollinger"] = {"upper": [], "lower": [], "mid": []}
+
+        # DCW
+        try:
+            results["dcw"] = self.compute_dcw(bars, dcw_len)
+        except InsufficientDataError:
+            logger.warning("insufficient_data_for_dcw", length=dcw_len, bars=len(bars))
+            results["dcw"] = []
+
+        # ATR SMA (useful for regime classification)
+        if results["atr"]:
+            valid_atr = [v for v in results["atr"] if not (isinstance(v, float) and np.isnan(v))]
+            if len(valid_atr) >= sma_len:
+                results["atr_sma"] = self.compute_sma(valid_atr, sma_len)
             else:
-                h = float(np.max(highs[i - period + 1: i + 1]))
-                lo = float(np.min(lows[i - period + 1: i + 1]))
-                upper.append(round(h, 6)); lower.append(round(lo, 6)); mid.append(round((h + lo) / 2, 6))
-        return upper, lower, mid
+                results["atr_sma"] = []
+        else:
+            results["atr_sma"] = []
 
-    # ── Bollinger ─────────────────────────────────────────────
-    def _compute_bollinger(self, data: np.ndarray) -> tuple[list[float], list[float], list[float]]:
-        period = self._bollinger_length
-        std_m = self._bollinger_std
-        n = len(data)
-        if n < period:
-            return [], [], []
-        upper, lower, mid = [], [], []
-        for i in range(n):
-            if i < period - 1:
-                upper.append(0.0); lower.append(0.0); mid.append(0.0)
-            else:
-                w = data[i - period + 1: i + 1]
-                s = float(np.mean(w))
-                sd = float(np.std(w, ddof=1))
-                upper.append(round(s + std_m * sd, 6)); lower.append(round(s - std_m * sd, 6)); mid.append(round(s, 6))
-        return upper, lower, mid
-
-    # ── DCW ───────────────────────────────────────────────────
-    def _compute_dcw(self, dc_upper: list[float], dc_lower: list[float]) -> list[float]:
-        return [round(u - lo, 6) for u, lo in zip(dc_upper, dc_lower)]
-
-    @staticmethod
-    def _cache_key(product: str, bars: list) -> str:
-        if not bars:
-            return f"{product}_empty"
-        return f"{product}_{len(bars)}_{bars[0].timestamp}_{bars[-1].timestamp}"
+        logger.info(
+            "compute_all_done",
+            bar_count=len(bars),
+            indicators=list(results.keys()),
+        )
+        return results

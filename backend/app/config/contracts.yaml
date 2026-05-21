@@ -1,98 +1,144 @@
-# ============================================================
-# CME Fed Funds Futures — Contract Configuration
-# ============================================================
-# Trader manually configures allowed contracts here.
-# Supports both outrights and calendar spreads.
-# NO hardcoded instruments — engine dynamically loads from YAML.
-# ============================================================
-
 contracts:
-  # ── Outright Contracts ──────────────────────────────────────
-  - symbol: FFN26
-    type: outright
-    description: "Fed Funds Jul 2026"
-    tick_size: 0.005
-    tick_value: 20.835
-    contract_value: 4167
-    expiry: "2026-07-31"
+  outrights:
+    - symbol: FFN25
+      name: "Fed Funds Jul 2025"
+      expiry: "2025-07-31"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
+    - symbol: FFQ25
+      name: "Fed Funds Aug 2025"
+      expiry: "2025-08-31"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
+    - symbol: FFU25
+      name: "Fed Funds Sep 2025"
+      expiry: "2025-09-30"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
+    - symbol: FFV25
+      name: "Fed Funds Oct 2025"
+      expiry: "2025-10-31"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
+    - symbol: FFX25
+      name: "Fed Funds Nov 2025"
+      expiry: "2025-11-30"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
+    - symbol: FFZ25
+      name: "Fed Funds Dec 2025"
+      expiry: "2025-12-31"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
+    - symbol: FFF26
+      name: "Fed Funds Jan 2026"
+      expiry: "2026-01-31"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
+    - symbol: FFG26
+      name: "Fed Funds Feb 2026"
+      expiry: "2026-02-28"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
+    - symbol: FFH26
+      name: "Fed Funds Mar 2026"
+      expiry: "2026-03-31"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
+    - symbol: FFJ26
+      name: "Fed Funds Apr 2026"
+      expiry: "2026-04-30"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
+    - symbol: FFK26
+      name: "Fed Funds May 2026"
+      expiry: "2026-05-31"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
+    - symbol: FFM26
+      name: "Fed Funds Jun 2026"
+      expiry: "2026-06-30"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
+    - symbol: FFN26
+      name: "Fed Funds Jul 2026"
+      expiry: "2026-07-31"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
+    - symbol: FFQ26
+      name: "Fed Funds Aug 2026"
+      expiry: "2026-08-31"
+      tick_size: 0.005
+      tick_value: 20.835
+      contract_value: 4167.0
+      point_value: 4167.0
 
-  - symbol: FFQ26
-    type: outright
-    description: "Fed Funds Aug 2026"
-    tick_size: 0.005
-    tick_value: 20.835
-    contract_value: 4167
-    expiry: "2026-08-31"
-
-  - symbol: FFU26
-    type: outright
-    description: "Fed Funds Sep 2026"
-    tick_size: 0.005
-    tick_value: 20.835
-    contract_value: 4167
-    expiry: "2026-09-30"
-
-  - symbol: FFV26
-    type: outright
-    description: "Fed Funds Oct 2026"
-    tick_size: 0.005
-    tick_value: 20.835
-    contract_value: 4167
-    expiry: "2026-10-31"
-
-  - symbol: FFX26
-    type: outright
-    description: "Fed Funds Nov 2026"
-    tick_size: 0.005
-    tick_value: 20.835
-    contract_value: 4167
-    expiry: "2026-11-30"
-
-  - symbol: FFZ26
-    type: outright
-    description: "Fed Funds Dec 2026"
-    tick_size: 0.005
-    tick_value: 20.835
-    contract_value: 4167
-    expiry: "2026-12-31"
-
-  # ── Calendar Spread Contracts ───────────────────────────────
-  - symbol: FFN26-FFQ26
-    type: spread
-    description: "Jul-Aug 2026 Calendar Spread"
-    front_contract: FFN26
-    back_contract: FFQ26
-    tick_size_bp: 0.5
-    tick_value: 20.835
-
-  - symbol: FFQ26-FFU26
-    type: spread
-    description: "Aug-Sep 2026 Calendar Spread"
-    front_contract: FFQ26
-    back_contract: FFU26
-    tick_size_bp: 0.5
-    tick_value: 20.835
-
-  - symbol: FFU26-FFV26
-    type: spread
-    description: "Sep-Oct 2026 Calendar Spread"
-    front_contract: FFU26
-    back_contract: FFV26
-    tick_size_bp: 0.5
-    tick_value: 20.835
-
-  - symbol: FFV26-FFX26
-    type: spread
-    description: "Oct-Nov 2026 Calendar Spread"
-    front_contract: FFV26
-    back_contract: FFX26
-    tick_size_bp: 0.5
-    tick_value: 20.835
-
-  - symbol: FFX26-FFZ26
-    type: spread
-    description: "Nov-Dec 2026 Calendar Spread"
-    front_contract: FFX26
-    back_contract: FFZ26
-    tick_size_bp: 0.5
-    tick_value: 20.835
+  spreads:
+    - symbol: FFN25-FFQ25
+      name: "Jul25-Aug25 Spread"
+      front_contract: FFN25
+      back_contract: FFQ25
+      tick_size_bp: 0.5
+      tick_value: 20.835
+    - symbol: FFQ25-FFU25
+      name: "Aug25-Sep25 Spread"
+      front_contract: FFQ25
+      back_contract: FFU25
+      tick_size_bp: 0.5
+      tick_value: 20.835
+    - symbol: FFU25-FFV25
+      name: "Sep25-Oct25 Spread"
+      front_contract: FFU25
+      back_contract: FFV25
+      tick_size_bp: 0.5
+      tick_value: 20.835
+    - symbol: FFV25-FFX25
+      name: "Oct25-Nov25 Spread"
+      front_contract: FFV25
+      back_contract: FFX25
+      tick_size_bp: 0.5
+      tick_value: 20.835
+    - symbol: FFX25-FFZ25
+      name: "Nov25-Dec25 Spread"
+      front_contract: FFX25
+      back_contract: FFZ25
+      tick_size_bp: 0.5
+      tick_value: 20.835
+    - symbol: FFZ25-FFF26
+      name: "Dec25-Jan26 Spread"
+      front_contract: FFZ25
+      back_contract: FFF26
+      tick_size_bp: 0.5
+      tick_value: 20.835
+    - symbol: FFN26-FFQ26
+      name: "Jul26-Aug26 Spread"
+      front_contract: FFN26
+      back_contract: FFQ26
+      tick_size_bp: 0.5
+      tick_value: 20.835

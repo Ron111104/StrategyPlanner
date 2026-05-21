@@ -1,0 +1,90 @@
+<!-- Watchlist HTMX Partial
+  Loaded into #watchlist-container
+  Variables:
+    - watchlist: list of {symbol, last, change, change_pct, spread_bp, atr, regime, signal_direction}
+-->
+<div class="overflow-x-auto">
+  <table class="w-full text-xs">
+    <thead>
+      <tr class="border-b border-gray-700/50">
+        <th class="text-left px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wider font-medium cursor-pointer hover:text-gray-300"
+            hx-get="/api/market-data/watchlist?sort=symbol"
+            hx-target="#watchlist-container"
+            hx-swap="innerHTML"
+        >Symbol</th>
+        <th class="text-right px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wider font-medium cursor-pointer hover:text-gray-300"
+            hx-get="/api/market-data/watchlist?sort=last"
+            hx-target="#watchlist-container"
+            hx-swap="innerHTML"
+        >Last</th>
+        <th class="text-right px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wider font-medium cursor-pointer hover:text-gray-300"
+            hx-get="/api/market-data/watchlist?sort=change"
+            hx-target="#watchlist-container"
+            hx-swap="innerHTML"
+        >Chg</th>
+        <th class="text-right px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wider font-medium">BP</th>
+        <th class="text-right px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wider font-medium">ATR</th>
+        <th class="text-center px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wider font-medium">Rgm</th>
+        <th class="text-center px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wider font-medium">Sig</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-700/20">
+      {% for item in watchlist | default([
+        {'symbol': 'ZQM2025', 'last': '95.4200', 'change': 0.0050, 'change_pct': 0.01, 'spread_bp': '4.25', 'atr': '0.0125', 'regime': 'TRENDING', 'signal_direction': 'LONG'},
+        {'symbol': 'ZQN2025', 'last': '95.4550', 'change': -0.0025, 'change_pct': -0.003, 'spread_bp': '3.50', 'atr': '0.0110', 'regime': 'NEUTRAL', 'signal_direction': ''},
+        {'symbol': 'ZQQ2025', 'last': '95.4900', 'change': 0.0100, 'change_pct': 0.01, 'spread_bp': '3.00', 'atr': '0.0135', 'regime': 'MEAN_REVERT', 'signal_direction': 'SHORT'},
+        {'symbol': 'ZQU2025', 'last': '95.5250', 'change': 0.0075, 'change_pct': 0.008, 'spread_bp': '3.50', 'atr': '0.0120', 'regime': 'TRENDING', 'signal_direction': 'LONG'},
+        {'symbol': 'ZQV2025', 'last': '95.5500', 'change': -0.0050, 'change_pct': -0.005, 'spread_bp': '2.50', 'atr': '0.0115', 'regime': 'VOLATILE', 'signal_direction': ''},
+        {'symbol': 'ZQX2025', 'last': '95.5800', 'change': 0.0025, 'change_pct': 0.003, 'spread_bp': '3.00', 'atr': '0.0130', 'regime': 'NEUTRAL', 'signal_direction': ''},
+        {'symbol': 'ZQZ2025', 'last': '95.6100', 'change': 0.0150, 'change_pct': 0.016, 'spread_bp': '3.00', 'atr': '0.0140', 'regime': 'TRENDING', 'signal_direction': 'LONG'},
+        {'symbol': 'ZQF2026', 'last': '95.6400', 'change': -0.0100, 'change_pct': -0.010, 'spread_bp': '3.00', 'atr': '0.0150', 'regime': 'MEAN_REVERT', 'signal_direction': ''}
+      ]) %}
+      <tr class="hover:bg-gray-700/20 cursor-pointer transition-colors"
+          hx-get="/api/market-data/snapshot/{{ item.symbol }}"
+          hx-target="#market-detail"
+          hx-swap="innerHTML"
+      >
+        <td class="px-3 py-1.5">
+          <div class="flex items-center gap-1.5">
+            <span class="w-1 h-1 rounded-full
+              {% if item.change|float > 0 %}bg-emerald-400
+              {% elif item.change|float < 0 %}bg-rose-400
+              {% else %}bg-gray-500{% endif %}
+            "></span>
+            <span class="font-mono font-semibold text-gray-200 text-[11px]">{{ item.symbol }}</span>
+          </div>
+        </td>
+        <td class="px-3 py-1.5 text-right font-mono font-semibold text-gray-100 text-[11px]">{{ item.last }}</td>
+        <td class="px-3 py-1.5 text-right font-mono font-semibold text-[11px]
+          {% if item.change|float > 0 %}text-emerald-400
+          {% elif item.change|float < 0 %}text-rose-400
+          {% else %}text-gray-400{% endif %}
+        ">
+          {% if item.change|float > 0 %}+{% endif %}{{ "%.4f" | format(item.change|float) }}
+        </td>
+        <td class="px-3 py-1.5 text-right font-mono text-gray-400 text-[11px]">{{ item.spread_bp }}</td>
+        <td class="px-3 py-1.5 text-right font-mono text-gray-400 text-[11px]">{{ item.atr }}</td>
+        <td class="px-3 py-1.5 text-center">
+          <span class="inline-flex px-1 py-0.5 rounded text-[9px] font-mono font-medium
+            {% if item.regime == 'TRENDING' %}bg-cyan-400/10 text-cyan-400
+            {% elif item.regime == 'VOLATILE' %}bg-rose-400/10 text-rose-400
+            {% elif item.regime == 'MEAN_REVERT' %}bg-amber-400/10 text-amber-400
+            {% else %}bg-gray-600/20 text-gray-500{% endif %}
+          ">{{ item.regime[:3] if item.regime else '—' }}</span>
+        </td>
+        <td class="px-3 py-1.5 text-center">
+          {% if item.signal_direction %}
+          <span class="inline-flex px-1 py-0.5 rounded text-[9px] font-mono font-bold
+            {% if item.signal_direction == 'LONG' %}bg-emerald-400/10 text-emerald-400
+            {% elif item.signal_direction == 'SHORT' %}bg-rose-400/10 text-rose-400
+            {% else %}bg-gray-600/20 text-gray-500{% endif %}
+          ">{{ item.signal_direction[:1] }}</span>
+          {% else %}
+          <span class="text-gray-600 text-[9px]">—</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

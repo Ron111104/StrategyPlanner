@@ -1,86 +1,127 @@
-"""
-Datetime utility helpers — timezone handling, bar alignment, staleness checks.
+"""Datetime helper functions for ZQ Strategy Planning Platform.
+
+Utility functions for timestamp parsing, timezone handling,
+timeframe conversion, and event window calculations.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Optional
-
-from app.contracts.market_data import Timeframe
+from datetime import UTC, datetime, timedelta
 
 
-def utc_now() -> datetime:
-    """Get current UTC timestamp."""
-    return datetime.now(timezone.utc)
+def now_utc() -> datetime:
+    """Return the current UTC datetime (timezone-aware).
+
+    Returns:
+        Current datetime with UTC timezone info.
+    """
+    return datetime.now(UTC)
 
 
-def ensure_utc(dt: datetime) -> datetime:
-    """Ensure a datetime is UTC-aware."""
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+def parse_timestamp(ts: str | int | float) -> datetime:
+    """Parse a timestamp from various formats into a UTC-aware datetime.
+
+    Supports:
+        - ISO 8601 strings (with or without timezone)
+        - Unix timestamps as int or float (seconds since epoch)
+
+    Args:
+        ts: Timestamp as ISO string, Unix int, or Unix float.
+
+    Returns:
+        Timezone-aware UTC datetime.
+
+    Raises:
+        ValueError: If the timestamp format cannot be parsed.
+    """
+    if isinstance(ts, (int, float)):
+        return datetime.fromtimestamp(ts, tz=UTC)
+
+    if isinstance(ts, str):
+        # Try ISO 8601 parsing first
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            return dt
+        except ValueError:
+            pass
+
+        # Try parsing as a numeric string (Unix timestamp)
+        try:
+            numeric_ts = float(ts)
+            return datetime.fromtimestamp(numeric_ts, tz=UTC)
+        except (ValueError, OverflowError, OSError):
+            pass
+
+        raise ValueError(f"Unable to parse timestamp: {ts!r}")
+
+    raise ValueError(f"Unsupported timestamp type: {type(ts).__name__}")
 
 
-def is_stale(
-    timestamp: datetime,
-    max_age_minutes: int = 60,
-) -> bool:
-    """Check if a timestamp is stale beyond max_age_minutes."""
-    now = utc_now()
-    ts = ensure_utc(timestamp)
-    return (now - ts) > timedelta(minutes=max_age_minutes)
+_TIMEFRAME_SECONDS: dict[str, int] = {
+    "1M": 60,
+    "5M": 300,
+    "15M": 900,
+    "1H": 3600,
+    "4H": 14400,
+    "1D": 86400,
+}
 
 
-def timeframe_to_minutes(tf: Timeframe) -> int:
-    """Convert a Timeframe enum to minutes."""
-    mapping = {
-        Timeframe.M1: 1,
-        Timeframe.M5: 5,
-        Timeframe.M15: 15,
-        Timeframe.H1: 60,
-        Timeframe.H4: 240,
-        Timeframe.D1: 1440,
-    }
-    return mapping[tf]
+def timeframe_to_seconds(tf: str) -> int:
+    """Convert a timeframe string to its duration in seconds.
 
+    Args:
+        tf: Timeframe string (e.g. '1M', '5M', '15M', '1H', '4H', '1D').
 
-def timeframe_to_timedelta(tf: Timeframe) -> timedelta:
-    """Convert a Timeframe enum to timedelta."""
-    return timedelta(minutes=timeframe_to_minutes(tf))
+    Returns:
+        Duration in seconds.
 
-
-def bars_are_monotonic(timestamps: list[datetime]) -> bool:
-    """Verify that timestamps are strictly monotonically increasing."""
-    for i in range(1, len(timestamps)):
-        if timestamps[i] <= timestamps[i - 1]:
-            return False
-    return True
-
-
-def find_duplicate_timestamps(timestamps: list[datetime]) -> list[datetime]:
-    """Find any duplicate timestamps in a list."""
-    seen: set[datetime] = set()
-    duplicates: list[datetime] = []
-    for ts in timestamps:
-        if ts in seen:
-            duplicates.append(ts)
-        seen.add(ts)
-    return duplicates
-
-
-def hours_until_event(event_time: datetime) -> float:
-    """Calculate hours until a scheduled event."""
-    now = utc_now()
-    event = ensure_utc(event_time)
-    delta = event - now
-    return delta.total_seconds() / 3600.0
+    Raises:
+        ValueError: If the timeframe is not recognized.
+    """
+    tf_upper = tf.upper()
+    if tf_upper not in _TIMEFRAME_SECONDS:
+        raise ValueError(
+            f"Unknown timeframe: {tf!r}. "
+            f"Supported: {', '.join(sorted(_TIMEFRAME_SECONDS.keys()))}"
+        )
+    return _TIMEFRAME_SECONDS[tf_upper]
 
 
 def is_within_event_window(
     event_time: datetime,
-    window_hours: float = 4.0,
+    current_time: datetime,
+    window_hours: float,
 ) -> bool:
-    """Check if current time is within the event lock window."""
-    hours = hours_until_event(event_time)
-    return -window_hours <= hours <= window_hours
+    """Check if the current time is within an event window.
+
+    The event window spans from (event_time - window_hours) to
+    (event_time + window_hours).
+
+    Args:
+        event_time: The scheduled event time.
+        current_time: The current time to check.
+        window_hours: The half-window size in hours.
+
+    Returns:
+        True if current_time is within the event window.
+    """
+    window = timedelta(hours=window_hours)
+    window_start = event_time - window
+    window_end = event_time + window
+    return window_start <= current_time <= window_end
+
+
+def format_timestamp(dt: datetime, fmt: str = "%Y-%m-%dT%H:%M:%SZ") -> str:
+    """Format a datetime into a string.
+
+    Args:
+        dt: Datetime to format.
+        fmt: strftime format string.
+
+    Returns:
+        Formatted datetime string.
+    """
+    return dt.strftime(fmt)

@@ -1,356 +1,486 @@
 """
-Strategy Engine — multi-strategy evaluation, conflict resolution, and signal generation.
+Strategy Engine.
 
-Orchestrates all strategy definitions against market data and regime state.
+Orchestrates strategy evaluation by coordinating indicator computation,
+regime classification, risk profiling, and signal generation across
+all configured strategy definitions.
 """
 
 from __future__ import annotations
 
 import time
-import uuid
-from typing import Any, Optional
+from typing import Any
 
+from app.config.settings import ContractRegistry
 from app.contracts.engine_output import (
     NoSignalResponse,
     SignalDirection,
+    SignalStrength,
     StrategyEvaluateRequest,
     StrategyEvaluateResponse,
     StrategySignal,
 )
-from app.contracts.execution_inputs import RiskCalcInput
-from app.contracts.macro_inputs import MarketRegime, RegimeClassificationInput, RegimeState
-from app.contracts.market_data import ContractType, OHLCVBar, SpreadBar, Timeframe
+from app.contracts.execution_inputs import AccountConfig
+from app.contracts.macro_inputs import MacroBias, MarketRegime, RegimeState
+from app.contracts.market_data import OHLCVBar
+from app.core.exceptions import InsufficientDataError, InvalidContractError
 from app.core.logging import get_logger
-from app.services.indicator_engine import IndicatorEngine, IndicatorResult
+from app.services.data_provider import DataProvider
+from app.services.indicator_engine import IndicatorEngine
 from app.services.regime_engine import RegimeEngine
 from app.services.risk_engine import RiskEngine
 from app.strategies.definitions import (
-    STRATEGY_EVALUATORS,
-    STRATEGY_REGISTRY,
+    CurveFlattener,
+    CurveSteepener,
+    EventFade,
+    EventMomentum,
+    MeanReversionRange,
     StrategyDefinition,
-    StrategyEvaluation,
-    StrategyName,
+    TrendFedRepricing,
+    VolatilityFade,
 )
+from app.utils.datetime_helpers import now_utc
+from app.utils.math_helpers import round_to_tick, safe_divide
+from app.utils.validation_helpers import validate_bars_minimum
 
 logger = get_logger(__name__)
+
+_DEFAULT_ACCOUNT = AccountConfig(
+    account_size_usd=100_000.0,
+    risk_per_trade_usd=500.0,
+    max_risk_per_trade_usd=2000.0,
+    max_position_size=50,
+    slippage_ticks=1,
+    commission_per_side=2.50,
+    event_risk_reduction=0.5,
+)
 
 
 class StrategyEngine:
     """
-    Multi-strategy evaluation engine with conflict resolution and signal ranking.
-
-    Supports:
-    - evaluate_strategy: single strategy evaluation
-    - evaluate_all: multi-strategy evaluation
-    - select_strategy: best signal selection
-    - build_signal: complete signal construction
+    Orchestrates evaluation of all strategy definitions against current
+    market data, indicators, and regime state.
     """
 
     def __init__(
         self,
         indicator_engine: IndicatorEngine,
-        regime_engine: RegimeEngine,
         risk_engine: RiskEngine,
-        settings: dict[str, Any],
+        regime_engine: RegimeEngine,
+        data_provider: DataProvider,
+        contract_registry: ContractRegistry,
+        config: dict[str, Any] | None = None,
     ) -> None:
-        self._indicators = indicator_engine
-        self._regime = regime_engine
-        self._risk = risk_engine
+        self._indicator_engine = indicator_engine
+        self._risk_engine = risk_engine
+        self._regime_engine = regime_engine
+        self._data_provider = data_provider
+        self._contract_registry = contract_registry
+        self._config = config or {}
 
-        scoring_cfg = settings.get("scoring", {})
-        self._min_confidence = scoring_cfg.get("min_confidence_threshold", 0.3)
-        self._high_confidence = scoring_cfg.get("high_confidence_threshold", 0.7)
-        self._caution_threshold = scoring_cfg.get("caution_threshold", 0.5)
-        self._conflict_penalty = scoring_cfg.get("conflicting_strategy_penalty", 0.15)
+        self._min_bars = self._config.get("min_bars_required", 51)
+        self._confidence_threshold = self._config.get("confidence_threshold", 0.6)
+        self._max_signals = self._config.get("max_simultaneous_signals", 5)
 
-        logger.info("strategy_engine_initialized")
+        self._strategies: list[StrategyDefinition] = self._load_strategies()
+        self._latest_signals: dict[str, StrategySignal | NoSignalResponse] = {}
 
-    def evaluate_strategy(
+        logger.info(
+            "strategy_engine_init",
+            strategies_loaded=len(self._strategies),
+            min_bars=self._min_bars,
+        )
+
+    def _load_strategies(self) -> list[StrategyDefinition]:
+        """Load and sort all strategy definitions by priority."""
+        strategies = [
+            TrendFedRepricing(),
+            MeanReversionRange(),
+            EventMomentum(),
+            EventFade(),
+            VolatilityFade(),
+            CurveSteepener(),
+            CurveFlattener(),
+        ]
+        strategies.sort(key=lambda s: s.priority)
+        return strategies
+
+    async def evaluate(
         self,
-        strategy_name: StrategyName,
-        bars: list[OHLCVBar],
-        spread_bars: list[SpreadBar] | None = None,
-        product: str = "",
-        contract_type: ContractType = ContractType.OUTRIGHT,
-        regime_state: RegimeState | None = None,
-    ) -> StrategyEvaluation:
-        """Evaluate a single strategy against market data."""
-        definition = STRATEGY_REGISTRY.get(strategy_name)
-        if not definition:
-            return StrategyEvaluation(
-                strategy_name=strategy_name.value,
-                disable_conditions=[f"Unknown strategy: {strategy_name}"],
-            )
-
-        # Check regime applicability
-        if regime_state and regime_state.regime not in definition.regime_applicability:
-            return StrategyEvaluation(
-                strategy_name=strategy_name.value,
-                disable_conditions=[
-                    f"Regime {regime_state.regime.value} not applicable for {strategy_name.value}"
-                ],
-            )
-
-        # Check contract type
-        if contract_type not in definition.contract_types:
-            return StrategyEvaluation(
-                strategy_name=strategy_name.value,
-                disable_conditions=[
-                    f"Contract type {contract_type.value} not supported by {strategy_name.value}"
-                ],
-            )
-
-        # Compute indicators
-        if contract_type == ContractType.SPREAD and spread_bars:
-            indicators = self._indicators.compute_spread_indicators(spread_bars, product)
-            price = spread_bars[-1].close_bp if spread_bars else 0.0
-        else:
-            indicators = self._indicators.compute(bars, product)
-            price = bars[-1].close if bars else 0.0
-
-        if not indicators.is_valid:
-            return StrategyEvaluation(
-                strategy_name=strategy_name.value,
-                disable_conditions=[indicators.error or "Invalid indicators"],
-            )
-
-        atr = indicators.current_atr
-
-        # Run strategy evaluator
-        evaluator = STRATEGY_EVALUATORS.get(strategy_name)
-        if not evaluator:
-            return StrategyEvaluation(
-                strategy_name=strategy_name.value,
-                disable_conditions=["No evaluator registered"],
-            )
-
-        if strategy_name in (StrategyName.CURVE_STEEPENER, StrategyName.CURVE_FLATTENER):
-            return evaluator(indicators, price, atr)
-        else:
-            return evaluator(indicators, price, atr)
-
-    def evaluate_all(
-        self,
-        bars: list[OHLCVBar],
-        spread_bars: list[SpreadBar] | None = None,
-        product: str = "",
-        contract_type: ContractType = ContractType.OUTRIGHT,
-        timeframe: Timeframe = Timeframe.H1,
-        regime_override: MarketRegime | None = None,
-        strategy_filter: list[str] | None = None,
+        request: StrategyEvaluateRequest,
     ) -> StrategyEvaluateResponse:
         """
-        Evaluate all applicable strategies and return ranked signals.
+        Evaluate all applicable strategies for a given product and timeframe.
 
-        Handles conflict resolution, confidence ranking, and caution flags.
+        1. Fetch bars from data provider cache
+        2. Validate minimum bar count
+        3. Compute all indicators
+        4. Classify or override regime
+        5. Evaluate each strategy
+        6. Compute risk profiles for signals
+        7. Sort by confidence and return
         """
-        start = time.perf_counter()
+        start_time = time.perf_counter()
+        product = request.product
+        timeframe = request.timeframe.value if hasattr(request.timeframe, 'value') else str(request.timeframe)
 
-        # Determine regime
-        if regime_override:
-            regime_state = RegimeState(regime=regime_override)
+        logger.info("strategy_evaluate_start", product=product, timeframe=timeframe)
+
+        # 1. Get bars
+        bars = await self._data_provider.get_bars(product, timeframe)
+        if bars is None or len(bars) == 0:
+            # Try fetching
+            try:
+                bars = await self._data_provider.fetch_bars(product, timeframe)
+            except Exception as exc:
+                logger.error("data_fetch_failed", product=product, error=str(exc))
+                bars = []
+
+        if not bars:
+            elapsed = (time.perf_counter() - start_time) * 1000
+            no_signal = NoSignalResponse(
+                product=product,
+                reason="No market data available",
+                regime=MarketRegime.RANGE,
+                bias=MacroBias.NEUTRAL,
+                timestamp=now_utc(),
+                strategies_evaluated=[],
+            )
+            self._latest_signals[product] = no_signal
+            return StrategyEvaluateResponse(
+                product=product,
+                timeframe=request.timeframe,
+                signals=[],
+                no_signal_reasons=[no_signal],
+                regime=RegimeState(
+                    current_regime=MarketRegime.RANGE,
+                    macro_bias=MacroBias.NEUTRAL,
+                    confidence=0.0,
+                    source="default",
+                    updated_at=now_utc(),
+                ),
+                evaluation_time_ms=elapsed,
+                bars_analyzed=0,
+                timestamp=now_utc(),
+            )
+
+        # 2. Validate minimum bars
+        try:
+            validate_bars_minimum(bars, self._min_bars, f"strategy evaluation for {product}")
+        except ValueError:
+            elapsed = (time.perf_counter() - start_time) * 1000
+            no_signal = NoSignalResponse(
+                product=product,
+                reason=f"Insufficient data: {len(bars)} bars < {self._min_bars} minimum",
+                regime=MarketRegime.RANGE,
+                bias=MacroBias.NEUTRAL,
+                timestamp=now_utc(),
+                strategies_evaluated=[],
+            )
+            self._latest_signals[product] = no_signal
+            return StrategyEvaluateResponse(
+                product=product,
+                timeframe=request.timeframe,
+                signals=[],
+                no_signal_reasons=[no_signal],
+                regime=RegimeState(
+                    current_regime=MarketRegime.RANGE,
+                    macro_bias=MacroBias.NEUTRAL,
+                    confidence=0.0,
+                    source="default",
+                    updated_at=now_utc(),
+                ),
+                evaluation_time_ms=elapsed,
+                bars_analyzed=len(bars),
+                timestamp=now_utc(),
+            )
+
+        # 3. Compute indicators
+        indicators = self._indicator_engine.compute_all(bars, self._indicator_engine._config)
+
+        # 4. Classify regime (or use override)
+        if request.regime_override:
+            regime = RegimeState(
+                current_regime=request.regime_override,
+                macro_bias=request.bias_override or MacroBias.NEUTRAL,
+                confidence=1.0,
+                source="manual",
+                updated_at=now_utc(),
+            )
         else:
-            # Auto-classify regime from indicators
-            if bars:
-                indicators = self._indicators.compute(bars, product)
-                if indicators.is_valid and indicators.sma_fast and indicators.sma_slow:
-                    regime_input = RegimeClassificationInput(
-                        current_atr=indicators.current_atr,
-                        atr_percentile=indicators.atr_percentile,
-                        ma_fast=indicators.sma_fast[-1],
-                        ma_slow=indicators.sma_slow[-1],
-                        price=bars[-1].close,
-                        donchian_upper=indicators.current_donchian_upper,
-                        donchian_lower=indicators.current_donchian_lower,
-                        dcw=indicators.current_dcw,
-                        volume=bars[-1].volume,
-                    )
-                    regime_state = self._regime.classify(regime_input)
-                else:
-                    regime_state = self._regime.current_state
-            else:
-                regime_state = self._regime.current_state
+            regime = await self._regime_engine.classify_regime(
+                product=product,
+                bars=bars,
+                indicators=indicators,
+            )
 
-        # Filter strategies
-        strategies_to_evaluate = list(STRATEGY_REGISTRY.keys())
-        if strategy_filter:
-            strategies_to_evaluate = [
-                s for s in strategies_to_evaluate
-                if s.value in strategy_filter
-            ]
+        if request.bias_override:
+            regime.macro_bias = request.bias_override
 
-        # Evaluate each strategy
-        evaluations: list[tuple[StrategyName, StrategyEvaluation]] = []
+        # 5. Get account config
+        account = request.account_config or _DEFAULT_ACCOUNT
+
+        # Determine product type
+        is_spread = self._is_spread_product(product)
+        product_type = "spread" if is_spread else "outright"
+
+        # Get contract specs
+        tick_size, tick_value = self._get_contract_specs(product, is_spread)
+
+        # 6. Evaluate each strategy
+        signals: list[StrategySignal] = []
         no_signal_reasons: list[NoSignalResponse] = []
 
-        for strategy_name in strategies_to_evaluate:
-            eval_result = self.evaluate_strategy(
-                strategy_name=strategy_name,
-                bars=bars,
-                spread_bars=spread_bars,
-                product=product,
-                contract_type=contract_type,
-                regime_state=regime_state,
-            )
-
-            if eval_result.is_applicable:
-                evaluations.append((strategy_name, eval_result))
-            else:
-                reasons = eval_result.disable_conditions or ["No signal conditions met"]
-                no_signal_reasons.append(NoSignalResponse(
+        for strategy in self._strategies:
+            try:
+                signal = self._evaluate_strategy(
+                    strategy=strategy,
+                    bars=bars,
+                    indicators=indicators,
+                    regime=regime,
+                    account=account,
                     product=product,
-                    timeframe=timeframe,
-                    reason="; ".join(reasons),
-                    regime=regime_state.regime,
-                    macro_bias=regime_state.macro_bias,
-                    checks_performed=eval_result.trigger_conditions,
-                ))
+                    product_type=product_type,
+                    tick_size=tick_size,
+                    tick_value=tick_value,
+                    is_spread=is_spread,
+                )
 
-        # Detect conflicts
-        conflicting = self._detect_conflicts(evaluations)
+                if signal is not None:
+                    signals.append(signal)
+                else:
+                    no_signal_reasons.append(
+                        NoSignalResponse(
+                            product=product,
+                            reason=f"{strategy.name}: No entry conditions met for {regime.current_regime.value} regime",
+                            regime=regime.current_regime,
+                            bias=regime.macro_bias,
+                            timestamp=now_utc(),
+                            strategies_evaluated=[strategy.name],
+                        )
+                    )
+            except Exception as exc:
+                logger.error(
+                    "strategy_eval_error",
+                    strategy=strategy.name,
+                    product=product,
+                    error=str(exc),
+                )
+                no_signal_reasons.append(
+                    NoSignalResponse(
+                        product=product,
+                        reason=f"{strategy.name}: Evaluation error - {str(exc)}",
+                        regime=regime.current_regime,
+                        bias=regime.macro_bias,
+                        timestamp=now_utc(),
+                        strategies_evaluated=[strategy.name],
+                    )
+                )
 
-        # Build signals with risk
-        signals: list[StrategySignal] = []
-        for strategy_name, eval_result in evaluations:
-            definition = STRATEGY_REGISTRY[strategy_name]
-            tick_size = 0.005 if contract_type == ContractType.OUTRIGHT else 0.005
-            tick_value = 20.835
+        # 7. Sort signals by confidence, limit count
+        signals.sort(key=lambda s: s.confidence, reverse=True)
+        signals = signals[: self._max_signals]
 
-            signal = self._build_signal(
-                eval_result=eval_result,
-                definition=definition,
-                product=product,
-                contract_type=contract_type,
-                timeframe=timeframe,
-                regime_state=regime_state,
-                tick_size=tick_size,
-                tick_value=tick_value,
-                has_conflicts=strategy_name.value in conflicting,
-            )
-            if signal:
-                signals.append(signal)
+        # Cache latest
+        if signals:
+            self._latest_signals[product] = signals[0]
+        elif no_signal_reasons:
+            self._latest_signals[product] = no_signal_reasons[0]
 
-        # Sort by confidence (descending) then priority (ascending)
-        signals.sort(key=lambda s: (-s.confidence_score, s.priority))
+        elapsed = (time.perf_counter() - start_time) * 1000
 
-        elapsed = (time.perf_counter() - start) * 1000
+        logger.info(
+            "strategy_evaluate_complete",
+            product=product,
+            signals=len(signals),
+            elapsed_ms=f"{elapsed:.2f}",
+        )
 
         return StrategyEvaluateResponse(
             product=product,
-            timeframe=timeframe,
-            regime=regime_state,
+            timeframe=request.timeframe,
             signals=signals,
             no_signal_reasons=no_signal_reasons,
+            regime=regime,
             evaluation_time_ms=round(elapsed, 2),
-            strategies_evaluated=[s.value for s in strategies_to_evaluate],
-            conflicting_strategies=conflicting,
+            bars_analyzed=len(bars),
+            timestamp=now_utc(),
         )
 
-    def select_strategy(
+    async def get_latest_signal(
         self,
-        response: StrategyEvaluateResponse,
-    ) -> StrategySignal | None:
-        """Select the best signal from evaluation response."""
-        valid = [s for s in response.signals if s.confidence_score >= self._min_confidence]
-        return valid[0] if valid else None
-
-    def _build_signal(
-        self,
-        eval_result: StrategyEvaluation,
-        definition: StrategyDefinition,
         product: str,
-        contract_type: ContractType,
-        timeframe: Timeframe,
-        regime_state: RegimeState,
+    ) -> StrategySignal | NoSignalResponse:
+        """Return the latest cached signal for a product."""
+        cached = self._latest_signals.get(product)
+        if cached is not None:
+            return cached
+
+        return NoSignalResponse(
+            product=product,
+            reason="No evaluation has been performed yet",
+            regime=MarketRegime.RANGE,
+            bias=MacroBias.NEUTRAL,
+            timestamp=now_utc(),
+            strategies_evaluated=[],
+        )
+
+    def get_strategy_list(self) -> list[dict[str, Any]]:
+        """Return list of available strategies with metadata."""
+        return [
+            {
+                "name": s.name,
+                "description": s.description,
+                "applicable_regimes": [r.value for r in s.applicable_regimes],
+                "applicable_products": s.applicable_products,
+                "priority": s.priority,
+                "risk_multiplier": s.risk_multiplier,
+            }
+            for s in self._strategies
+        ]
+
+    def _evaluate_strategy(
+        self,
+        strategy: StrategyDefinition,
+        bars: list[OHLCVBar],
+        indicators: dict[str, Any],
+        regime: RegimeState,
+        account: AccountConfig,
+        product: str,
+        product_type: str,
         tick_size: float,
         tick_value: float,
-        has_conflicts: bool,
+        is_spread: bool,
     ) -> StrategySignal | None:
-        """Build a complete StrategySignal from evaluation result."""
-        if not eval_result.is_applicable or eval_result.entry_price <= 0:
+        """Evaluate a single strategy against current market conditions."""
+
+        # Check regime applicability
+        if regime.current_regime not in strategy.applicable_regimes:
             return None
 
-        # Compute risk
-        risk_input = RiskCalcInput(
-            entry_price=eval_result.entry_price,
-            stop_price=eval_result.stop_price,
-            contract_type=contract_type,
-            tick_size=tick_size,
-            tick_value=tick_value,
-            is_event_regime=regime_state.regime == MarketRegime.EVENT,
-            volatility_multiplier=definition.risk_multiplier,
-        )
-        risk_calc = self._risk.compute_risk(risk_input, eval_result.targets)
+        # Check product type applicability
+        if product_type not in strategy.applicable_products:
+            return None
 
-        # Build ladder
-        direction = eval_result.direction
-        ladder = self._risk.build_ladder(
-            entry_price=eval_result.entry_price,
-            stop_price=eval_result.stop_price,
-            targets=eval_result.targets,
-            total_lots=risk_calc.max_lots,
+        # Check disable conditions
+        if strategy.should_disable(regime, indicators):
+            return None
+
+        # Evaluate entry conditions
+        signal_params = strategy.evaluate(bars, indicators, regime)
+        if signal_params is None:
+            return None
+
+        entry_price = signal_params["entry_price"]
+        stop_price = signal_params["stop_price"]
+        target_price = signal_params["target_price"]
+        direction = signal_params["direction"]
+        confidence = signal_params.get("confidence", 0.5)
+        notes = signal_params.get("notes", [])
+        invalidation = signal_params.get("invalidation_conditions", [])
+        indicators_used = signal_params.get("indicators_used", {})
+
+        # Skip low confidence signals
+        if confidence < self._confidence_threshold:
+            return None
+
+        # Round prices to tick
+        entry_price = round_to_tick(entry_price, tick_size)
+        stop_price = round_to_tick(stop_price, tick_size)
+        target_price = round_to_tick(target_price, tick_size)
+
+        # Compute position size
+        is_event = regime.current_regime == MarketRegime.EVENT
+        from app.contracts.execution_inputs import PositionSizingRequest
+
+        sizing_req = PositionSizingRequest(
+            account_config=account,
+            entry_price=entry_price,
+            stop_price=stop_price,
+            contract_tick_size=tick_size,
+            contract_tick_value=tick_value,
+            is_spread=is_spread,
+            is_event_window=is_event,
+        )
+        position_size = self._risk_engine.compute_position_size(sizing_req)
+
+        # Compute risk profile
+        risk_profile = self._risk_engine.compute_risk_profile(
+            entry_price=entry_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            position_size=position_size,
+            direction=direction,
             tick_size=tick_size,
             tick_value=tick_value,
+            slippage_ticks=account.slippage_ticks,
+            commission_per_side=account.commission_per_side,
+        )
+
+        # Generate ladder
+        ladder = self._risk_engine.generate_ladder(
+            entry_price=entry_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            total_size=position_size,
+            num_levels=3,
+            tick_size=tick_size,
             direction=direction,
         )
 
-        # Confidence adjustments
-        confidence = eval_result.confidence
-        if has_conflicts:
-            confidence = max(0, confidence - self._conflict_penalty)
-
-        # Caution flag
-        caution = confidence < self._caution_threshold
-        caution_reasons = list(eval_result.caution_reasons)
-        if has_conflicts:
-            caution_reasons.append("Conflicting strategy signals detected")
-        if risk_calc.max_lots == 0:
-            caution = True
-            caution_reasons.append("Zero position size")
-
-        # Direction
-        sig_direction = {
-            "long": SignalDirection.LONG,
-            "short": SignalDirection.SHORT,
-        }.get(direction, SignalDirection.NEUTRAL)
+        # Determine signal strength
+        if confidence >= 0.8:
+            strength = SignalStrength.STRONG
+        elif confidence >= 0.6:
+            strength = SignalStrength.MODERATE
+        else:
+            strength = SignalStrength.WEAK
 
         return StrategySignal(
-            signal_id=str(uuid.uuid4()),
-            strategy_name=eval_result.strategy_name,
+            strategy_name=strategy.name,
             product=product,
-            contract_type=contract_type,
-            timeframe=timeframe,
-            direction=sig_direction,
-            entry_price=eval_result.entry_price,
-            stop_price=eval_result.stop_price,
-            targets=eval_result.targets,
-            risk_calc=risk_calc,
-            ladder_plan=ladder,
-            confidence_score=round(confidence, 3),
-            priority=definition.priority,
-            caution_flag=caution,
-            caution_reasons=caution_reasons,
-            trigger_conditions=eval_result.trigger_conditions,
-            disable_conditions_checked=eval_result.disable_conditions,
-            invalidation_conditions=eval_result.invalidation_conditions,
-            regime_context=regime_state,
-            macro_bias=regime_state.macro_bias,
-            strategy_metadata=eval_result.metadata,
+            direction=SignalDirection(direction),
+            entry_price=entry_price,
+            stop_price=stop_price,
+            target_price=target_price,
+            confidence=round(confidence, 4),
+            strength=strength,
+            regime=regime.current_regime,
+            bias=regime.macro_bias,
+            risk_reward_ratio=round(risk_profile.risk_reward_ratio, 2),
+            dollar_risk=round(risk_profile.dollar_risk, 2),
+            position_size=position_size,
+            timestamp=now_utc(),
+            invalidation_conditions=invalidation,
+            notes=notes,
+            ladder=ladder,
+            indicators_used=indicators_used,
         )
 
-    def _detect_conflicts(
+    def _is_spread_product(self, product: str) -> bool:
+        """Check if a product is a spread contract."""
+        if "-" in product:
+            return True
+        for spread in self._contract_registry.spreads:
+            if spread.symbol == product:
+                return True
+        return False
+
+    def _get_contract_specs(
         self,
-        evaluations: list[tuple[StrategyName, StrategyEvaluation]],
-    ) -> list[str]:
-        """Detect conflicting strategy signals (opposing directions)."""
-        directions: dict[str, list[str]] = {}
-        for name, eval_result in evaluations:
-            if eval_result.is_applicable:
-                directions.setdefault(eval_result.direction, []).append(name.value)
-
-        conflicting: list[str] = []
-        if "long" in directions and "short" in directions:
-            conflicting.extend(directions["long"])
-            conflicting.extend(directions["short"])
-
-        return conflicting
+        product: str,
+        is_spread: bool,
+    ) -> tuple[float, float]:
+        """Get tick_size and tick_value for a contract."""
+        if is_spread:
+            for spread in self._contract_registry.spreads:
+                if spread.symbol == product:
+                    return spread.tick_size_bp * 0.01, spread.tick_value
+            # Default spread specs
+            return 0.005, 20.835
+        else:
+            for outright in self._contract_registry.outrights:
+                if outright.symbol == product:
+                    return outright.tick_size, outright.tick_value
+            # Default outright specs
+            return 0.005, 20.835

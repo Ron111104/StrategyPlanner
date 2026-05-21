@@ -1,0 +1,185 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}Position Sizing - ZQ Strategy Planner{% endblock %}
+
+{% block content %}
+<div class="p-6 space-y-6" x-data="positionSizing()">
+    <div>
+        <h1 class="text-2xl font-bold text-gray-100">Position Sizing</h1>
+        <p class="text-gray-400 text-sm mt-1">Risk-adjusted position sizing calculator</p>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- Account Configuration -->
+        <div class="bg-[#111827] rounded-lg border border-gray-700/50 p-5">
+            <h3 class="text-sm font-medium text-gray-200 mb-4">Account Configuration</h3>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-xs font-medium text-gray-400 mb-1.5">Account Size (USD)</label>
+                    <input type="number" x-model.number="accountSize" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm font-mono">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-400 mb-1.5">Risk Per Trade (USD)</label>
+                    <input type="number" x-model.number="riskPerTrade" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm font-mono">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-400 mb-1.5">Max Risk Per Trade (USD)</label>
+                    <input type="number" x-model.number="maxRisk" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm font-mono">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-400 mb-1.5">Max Position Size</label>
+                    <input type="number" x-model.number="maxPosition" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm font-mono">
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-400 mb-1.5">Slippage (ticks)</label>
+                        <input type="number" x-model.number="slippage" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm font-mono">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-400 mb-1.5">Commission/side</label>
+                        <input type="number" x-model.number="commission" step="0.01" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm font-mono">
+                    </div>
+                </div>
+                <div class="flex items-center gap-3">
+                    <input type="checkbox" x-model="isEventWindow" id="event-window" class="rounded bg-[#1a1f2e] border-gray-600 text-cyan-500 focus:ring-cyan-500">
+                    <label for="event-window" class="text-sm text-gray-400">Event Window (50% risk reduction)</label>
+                </div>
+                <button @click="saveConfig()" class="w-full bg-gray-700 hover:bg-gray-600 text-gray-200 font-medium py-2 px-4 rounded-md transition-all text-sm">
+                    Save Account Config
+                </button>
+            </div>
+        </div>
+
+        <!-- Sizing Calculator -->
+        <div class="space-y-6">
+            <div class="bg-[#111827] rounded-lg border border-gray-700/50 p-5">
+                <h3 class="text-sm font-medium text-gray-200 mb-4">Trade Parameters</h3>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-400 mb-1.5">Contract</label>
+                        <select x-model="contract" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm">
+                            {% for c in contracts.outrights %}
+                            <option value="{{ c.symbol }}">{{ c.symbol }} (tick: {{ c.tick_size }})</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1.5">Entry Price</label>
+                            <input type="number" x-model.number="entryPrice" step="0.005" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm font-mono">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1.5">Stop Price</label>
+                            <input type="number" x-model.number="stopPrice" step="0.005" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm font-mono">
+                        </div>
+                    </div>
+                    <button @click="computeSize()" class="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-medium py-2 px-4 rounded-md transition-all text-sm">
+                        Compute Position Size
+                    </button>
+                </div>
+            </div>
+
+            <!-- Results -->
+            <div x-show="result !== null" class="bg-[#111827] rounded-lg border border-gray-700/50 p-5">
+                <h3 class="text-sm font-medium text-gray-200 mb-4">Sizing Result</h3>
+                <div class="space-y-3">
+                    <div class="text-center py-4">
+                        <span class="text-4xl font-bold font-mono text-cyan-400" x-text="result"></span>
+                        <span class="text-lg text-gray-400 ml-2">contracts</span>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4 text-sm">
+                        <div class="flex justify-between">
+                            <span class="text-gray-500">Tick Risk</span>
+                            <span class="font-mono text-gray-300" x-text="tickRisk + ' ticks'"></span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-500">$/Contract Risk</span>
+                            <span class="font-mono text-rose-400" x-text="'$' + riskPerContract.toFixed(2)"></span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-500">Total Risk</span>
+                            <span class="font-mono text-rose-400" x-text="'$' + totalRisk.toFixed(2)"></span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-500">Round Trip Cost</span>
+                            <span class="font-mono text-amber-400" x-text="'$' + roundTripCost.toFixed(2)"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function positionSizing() {
+    return {
+        accountSize: 100000,
+        riskPerTrade: 500,
+        maxRisk: 2000,
+        maxPosition: 50,
+        slippage: 1,
+        commission: 2.50,
+        isEventWindow: false,
+        contract: '{{ contracts.outrights[0].symbol if contracts.outrights else "" }}',
+        entryPrice: 96.500,
+        stopPrice: 96.450,
+        result: null,
+        tickRisk: 0,
+        riskPerContract: 0,
+        totalRisk: 0,
+        roundTripCost: 0,
+
+        async saveConfig() {
+            try {
+                const api = new ApiClient();
+                await api.updateAccountConfig({
+                    account_size_usd: this.accountSize,
+                    risk_per_trade_usd: this.riskPerTrade,
+                    max_risk_per_trade_usd: this.maxRisk,
+                    max_position_size: this.maxPosition,
+                    slippage_ticks: this.slippage,
+                    commission_per_side: this.commission,
+                    event_risk_reduction: 0.5
+                });
+                showNotification('Account config saved', 'success');
+            } catch (err) {
+                showNotification('Failed to save config: ' + err.message, 'error');
+            }
+        },
+
+        async computeSize() {
+            try {
+                const api = new ApiClient();
+                const result = await api.computeSizing({
+                    account_config: {
+                        account_size_usd: this.accountSize,
+                        risk_per_trade_usd: this.riskPerTrade,
+                        max_risk_per_trade_usd: this.maxRisk,
+                        max_position_size: this.maxPosition,
+                        slippage_ticks: this.slippage,
+                        commission_per_side: this.commission,
+                        event_risk_reduction: 0.5
+                    },
+                    entry_price: this.entryPrice,
+                    stop_price: this.stopPrice,
+                    contract_tick_size: 0.005,
+                    contract_tick_value: 20.835,
+                    is_spread: false,
+                    is_event_window: this.isEventWindow
+                });
+                this.result = result.position_size || result;
+                this.tickRisk = Math.abs(Math.round((this.entryPrice - this.stopPrice) / 0.005));
+                this.riskPerContract = this.tickRisk * 20.835;
+                this.totalRisk = this.riskPerContract * (typeof this.result === 'number' ? this.result : 1);
+                this.roundTripCost = (this.slippage * 20.835 * 2 + this.commission * 2) * (typeof this.result === 'number' ? this.result : 1);
+            } catch (err) {
+                showNotification('Sizing failed: ' + err.message, 'error');
+            }
+        }
+    };
+}
+</script>
+{% endblock %}

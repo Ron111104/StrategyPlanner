@@ -1,0 +1,91 @@
+<!-- Signal Card Component
+  Variables:
+    - signal: object with {strategy, direction, entry, stop, target, rr_ratio, confidence, timestamp, product}
+-->
+<div class="rounded-lg bg-[#1a1f2e] border border-gray-700/50 overflow-hidden hover:border-gray-600/50 transition-colors animate-slide-in">
+  <!-- Header -->
+  <div class="flex items-center justify-between px-3 py-2 border-b border-gray-700/30
+    {% if signal.direction == 'LONG' %}bg-emerald-400/5{% elif signal.direction == 'SHORT' %}bg-rose-400/5{% else %}bg-gray-700/10{% endif %}
+  ">
+    <div class="flex items-center gap-2">
+      <span class="text-xs font-semibold text-gray-200">{{ signal.strategy | default("Mean Reversion") }}</span>
+      {% if signal.product %}
+        <span class="text-[10px] font-mono text-gray-500">{{ signal.product }}</span>
+      {% endif %}
+    </div>
+    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold font-mono uppercase tracking-wider
+      {% if signal.direction == 'LONG' %}bg-emerald-400/10 text-emerald-400 ring-1 ring-emerald-400/20
+      {% elif signal.direction == 'SHORT' %}bg-rose-400/10 text-rose-400 ring-1 ring-rose-400/20
+      {% else %}bg-gray-600/20 text-gray-400 ring-1 ring-gray-600/30{% endif %}
+    ">
+      {% if signal.direction == 'LONG' %}
+        <svg class="w-3 h-3 mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"/></svg>
+      {% elif signal.direction == 'SHORT' %}
+        <svg class="w-3 h-3 mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+      {% endif %}
+      {{ signal.direction | default("FLAT") }}
+    </span>
+  </div>
+
+  <!-- Price Levels -->
+  <div class="px-3 py-2 space-y-1.5">
+    <div class="grid grid-cols-3 gap-2">
+      <div>
+        <span class="text-[10px] text-gray-500 uppercase">Entry</span>
+        <p class="text-sm font-mono font-semibold text-gray-100">{{ signal.entry | default("95.4200") }}</p>
+      </div>
+      <div>
+        <span class="text-[10px] text-gray-500 uppercase">Stop</span>
+        <p class="text-sm font-mono font-semibold text-rose-400">{{ signal.stop | default("95.3900") }}</p>
+      </div>
+      <div>
+        <span class="text-[10px] text-gray-500 uppercase">Target</span>
+        <p class="text-sm font-mono font-semibold text-emerald-400">{{ signal.target | default("95.4800") }}</p>
+      </div>
+    </div>
+
+    <!-- R:R and Confidence -->
+    <div class="flex items-center justify-between pt-1 border-t border-gray-700/30">
+      <div class="flex items-center gap-3">
+        <div>
+          <span class="text-[10px] text-gray-500">R:R</span>
+          <span class="text-xs font-mono font-semibold ml-1
+            {% if signal.rr_ratio|default(2.0)|float >= 2.0 %}text-emerald-400
+            {% elif signal.rr_ratio|default(2.0)|float >= 1.5 %}text-amber-400
+            {% else %}text-rose-400{% endif %}
+          ">{{ signal.rr_ratio | default("2.00") }}:1</span>
+        </div>
+      </div>
+
+      <!-- Confidence Bar -->
+      <div class="flex items-center gap-2">
+        <span class="text-[10px] text-gray-500">Conf</span>
+        <div class="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+          <div class="h-full rounded-full transition-all duration-500
+            {% if signal.confidence|default(70)|int >= 75 %}bg-emerald-400
+            {% elif signal.confidence|default(70)|int >= 50 %}bg-amber-400
+            {% else %}bg-rose-400{% endif %}
+          " style="width: {{ signal.confidence | default(70) }}%"></div>
+        </div>
+        <span class="text-[10px] font-mono
+          {% if signal.confidence|default(70)|int >= 75 %}text-emerald-400
+          {% elif signal.confidence|default(70)|int >= 50 %}text-amber-400
+          {% else %}text-rose-400{% endif %}
+        ">{{ signal.confidence | default(70) }}%</span>
+      </div>
+    </div>
+
+    <!-- Timestamp -->
+    <div class="flex items-center justify-between pt-1">
+      <span class="text-[10px] text-gray-600 font-mono">{{ signal.timestamp | default("2025-05-21 12:00:00") }}</span>
+      <button
+        class="text-[10px] text-cyan-400 hover:text-cyan-300 transition-colors font-medium"
+        hx-get="/api/strategy/signal/{{ signal.id | default('') }}/details"
+        hx-target="#signal-detail-modal"
+        hx-swap="innerHTML"
+      >
+        Details →
+      </button>
+    </div>
+  </div>
+</div>

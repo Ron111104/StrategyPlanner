@@ -1,555 +1,881 @@
 """
-Strategy Definitions — six institutional strategies for Fed Funds futures.
+Strategy definitions for CME Fed Funds Futures (ZQ) Strategy Planning Platform.
 
-Each strategy contains complete logic for:
-- regime applicability
-- entry/stop/target logic
-- confidence scoring
-- disable conditions
-- invalidation conditions
+Seven complete strategies with full entry/stop/target evaluation logic:
+1. TrendFedRepricing   – Trend-following EMA crossover with ATR confirmation
+2. MeanReversionRange  – Bollinger band mean-reversion in range regimes
+3. EventMomentum       – Donchian breakout on macro events
+4. EventFade           – Fade extreme event moves (>2σ)
+5. VolatilityFade      – Fade vol spikes at Bollinger extremes
+6. CurveSteepener      – Buy front / sell back on narrow spreads
+7. CurveFlattener      – Sell front / buy back on wide spreads
 """
-
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
-from app.contracts.macro_inputs import MarketRegime
-from app.contracts.market_data import ContractType
-from app.services.indicator_engine import IndicatorResult
+import numpy as np
+import structlog
+
+from app.contracts.macro_inputs import MacroBias, MarketRegime, RegimeState
+from app.contracts.market_data import OHLCVBar
+
+logger: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
 
-class StrategyName(str, Enum):
-    TREND_FED_REPRICING = "TrendFedRepricing"
-    MEAN_REVERSION_RANGE = "MeanReversionRange"
-    EVENT_MOMENTUM = "EventMomentum"
-    EVENT_FADE = "EventFade"
-    VOLATILITY_FADE = "VolatilityFade"
-    CURVE_STEEPENER = "CurveSteepener"
-    CURVE_FLATTENER = "CurveFlattener"
+# ──────────────────────────────────────────────────────────────────────
+# Signal parameters returned by each strategy's evaluate()
+# ──────────────────────────────────────────────────────────────────────
 
+@dataclass(frozen=True, slots=True)
+class SignalParams:
+    """Parameters returned when a strategy fires a signal."""
+    direction: str            # "long" or "short"
+    entry_price: float
+    stop_price: float
+    target_price: float
+    confidence: float         # 0.0 – 1.0
+    reason: str
+    risk_multiplier: float    # strategy-specific multiplier for position sizing
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Base strategy definition
+# ──────────────────────────────────────────────────────────────────────
 
 @dataclass
 class StrategyDefinition:
-    """Complete strategy definition with all parameters."""
-    name: StrategyName
-    regime_applicability: list[MarketRegime]
-    contract_types: list[ContractType]
-    priority: int
-    risk_multiplier: float = 1.0
-    volatility_suitability: str = "normal"
-    description: str = ""
+    """Base class for all strategy definitions."""
+    name: str
+    description: str
+    applicable_regimes: list[MarketRegime]
+    applicable_products: list[str]   # "outright", "spread"
+    priority: int                     # lower = higher priority
+    risk_multiplier: float
+    volatility_suitability: list[str] # "low", "medium", "high"
+    enabled: bool = True
 
+    def is_applicable(self, regime: RegimeState, product_type: str) -> bool:
+        """Check if this strategy applies to the given regime and product type."""
+        if not self.enabled:
+            return False
+        if regime.regime not in self.applicable_regimes:
+            return False
+        if product_type not in self.applicable_products:
+            return False
+        return True
+
+    def evaluate(
+        self,
+        bars: list[OHLCVBar],
+        indicators: dict[str, Any],
+        regime: RegimeState,
+    ) -> SignalParams | None:
+        """Evaluate this strategy and return signal params, or None."""
+        raise NotImplementedError
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────
+
+def _last_valid(series: list[float], offset: int = 0) -> float | None:
+    """Return the (len-1-offset)th non-NaN value, or None."""
+    idx = len(series) - 1 - offset
+    if idx < 0:
+        return None
+    v = series[idx]
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return None
+    return v
+
+
+def _last_n_valid(series: list[float], n: int) -> list[float]:
+    """Return last *n* non-NaN values from series."""
+    result: list[float] = []
+    for v in reversed(series):
+        if v is not None and not (isinstance(v, float) and math.isnan(v)):
+            result.append(v)
+            if len(result) == n:
+                break
+    result.reverse()
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 1. Trend Fed Repricing
+# ══════════════════════════════════════════════════════════════════════
 
 @dataclass
-class StrategyEvaluation:
-    """Result of evaluating a single strategy against market data."""
-    strategy_name: str
-    is_applicable: bool = False
-    direction: str = "neutral"
-    entry_price: float = 0.0
-    stop_price: float = 0.0
-    targets: list[float] = field(default_factory=list)
-    confidence: float = 0.0
-    trigger_conditions: list[str] = field(default_factory=list)
-    disable_conditions: list[str] = field(default_factory=list)
-    invalidation_conditions: list[str] = field(default_factory=list)
-    caution_reasons: list[str] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
+class TrendFedRepricing(StrategyDefinition):
+    """Trend-following: EMA21 crossover with ATR confirmation.
 
-
-# ── Strategy Definitions ──────────────────────────────────────
-
-STRATEGY_REGISTRY: dict[StrategyName, StrategyDefinition] = {
-    StrategyName.TREND_FED_REPRICING: StrategyDefinition(
-        name=StrategyName.TREND_FED_REPRICING,
-        regime_applicability=[MarketRegime.TREND],
-        contract_types=[ContractType.OUTRIGHT, ContractType.SPREAD],
-        priority=1,
-        risk_multiplier=1.0,
-        volatility_suitability="normal",
-        description="Breakout continuation on repricing momentum",
-    ),
-    StrategyName.MEAN_REVERSION_RANGE: StrategyDefinition(
-        name=StrategyName.MEAN_REVERSION_RANGE,
-        regime_applicability=[MarketRegime.RANGE],
-        contract_types=[ContractType.OUTRIGHT, ContractType.SPREAD],
-        priority=2,
-        risk_multiplier=0.8,
-        volatility_suitability="low",
-        description="Range fade on Donchian reversion",
-    ),
-    StrategyName.EVENT_MOMENTUM: StrategyDefinition(
-        name=StrategyName.EVENT_MOMENTUM,
-        regime_applicability=[MarketRegime.EVENT],
-        contract_types=[ContractType.OUTRIGHT],
-        priority=3,
-        risk_multiplier=1.2,
-        volatility_suitability="high",
-        description="Macro event breakout continuation",
-    ),
-    StrategyName.EVENT_FADE: StrategyDefinition(
-        name=StrategyName.EVENT_FADE,
-        regime_applicability=[MarketRegime.EVENT],
-        contract_types=[ContractType.OUTRIGHT],
-        priority=4,
-        risk_multiplier=0.7,
-        volatility_suitability="high",
-        description="Post-event exhaustion fade",
-    ),
-    StrategyName.VOLATILITY_FADE: StrategyDefinition(
-        name=StrategyName.VOLATILITY_FADE,
-        regime_applicability=[MarketRegime.VOLATILITY],
-        contract_types=[ContractType.OUTRIGHT, ContractType.SPREAD],
-        priority=5,
-        risk_multiplier=0.6,
-        volatility_suitability="high",
-        description="High ATR mean reversion fade",
-    ),
-    StrategyName.CURVE_STEEPENER: StrategyDefinition(
-        name=StrategyName.CURVE_STEEPENER,
-        regime_applicability=[MarketRegime.TREND, MarketRegime.RANGE, MarketRegime.VOLATILITY],
-        contract_types=[ContractType.SPREAD],
-        priority=6,
-        risk_multiplier=1.0,
-        volatility_suitability="normal",
-        description="Spread widening on lower Donchian break",
-    ),
-    StrategyName.CURVE_FLATTENER: StrategyDefinition(
-        name=StrategyName.CURVE_FLATTENER,
-        regime_applicability=[MarketRegime.TREND, MarketRegime.RANGE, MarketRegime.VOLATILITY],
-        contract_types=[ContractType.SPREAD],
-        priority=7,
-        risk_multiplier=1.0,
-        volatility_suitability="normal",
-        description="Spread compression on upper Donchian break",
-    ),
-}
-
-
-# ── Strategy Logic Functions ──────────────────────────────────
-
-def evaluate_trend_fed_repricing(
-    indicators: IndicatorResult,
-    price: float,
-    atr: float,
-) -> StrategyEvaluation:
-    """TrendFedRepricing: breakout continuation, momentum-based, trend regime only."""
-    eval_result = StrategyEvaluation(strategy_name=StrategyName.TREND_FED_REPRICING.value)
-
-    if not indicators.is_valid or not indicators.sma_fast or not indicators.sma_slow:
-        eval_result.disable_conditions.append("Invalid indicators")
-        return eval_result
-
-    sma_fast = indicators.sma_fast[-1]
-    sma_slow = indicators.sma_slow[-1]
-    donchian_upper = indicators.current_donchian_upper
-    donchian_lower = indicators.current_donchian_lower
-
-    if atr == 0:
-        eval_result.disable_conditions.append("Zero ATR")
-        return eval_result
-
-    # Bullish breakout: price > Donchian upper AND fast > slow
-    if price >= donchian_upper and sma_fast > sma_slow:
-        eval_result.is_applicable = True
-        eval_result.direction = "long"
-        eval_result.entry_price = price
-        eval_result.stop_price = round(price - 2 * atr, 6)
-        eval_result.targets = [
-            round(price + 1.5 * atr, 6),
-            round(price + 2.5 * atr, 6),
-            round(price + 4.0 * atr, 6),
-        ]
-        eval_result.confidence = min(0.85, 0.5 + (sma_fast - sma_slow) / price * 10)
-        eval_result.trigger_conditions = [
-            f"Price ({price:.3f}) >= Donchian upper ({donchian_upper:.3f})",
-            f"SMA fast ({sma_fast:.3f}) > SMA slow ({sma_slow:.3f})",
-        ]
-
-    # Bearish breakout: price < Donchian lower AND fast < slow
-    elif price <= donchian_lower and sma_fast < sma_slow:
-        eval_result.is_applicable = True
-        eval_result.direction = "short"
-        eval_result.entry_price = price
-        eval_result.stop_price = round(price + 2 * atr, 6)
-        eval_result.targets = [
-            round(price - 1.5 * atr, 6),
-            round(price - 2.5 * atr, 6),
-            round(price - 4.0 * atr, 6),
-        ]
-        eval_result.confidence = min(0.85, 0.5 + (sma_slow - sma_fast) / price * 10)
-        eval_result.trigger_conditions = [
-            f"Price ({price:.3f}) <= Donchian lower ({donchian_lower:.3f})",
-            f"SMA fast ({sma_fast:.3f}) < SMA slow ({sma_slow:.3f})",
-        ]
-
-    eval_result.invalidation_conditions = [
-        "MA crossover reversal",
-        "ATR collapse below 50th percentile",
-    ]
-
-    return eval_result
-
-
-def evaluate_mean_reversion_range(
-    indicators: IndicatorResult,
-    price: float,
-    atr: float,
-) -> StrategyEvaluation:
-    """MeanReversionRange: range fade, Donchian reversion, low volatility."""
-    eval_result = StrategyEvaluation(strategy_name=StrategyName.MEAN_REVERSION_RANGE.value)
-
-    if not indicators.is_valid:
-        eval_result.disable_conditions.append("Invalid indicators")
-        return eval_result
-
-    donchian_upper = indicators.current_donchian_upper
-    donchian_lower = indicators.current_donchian_lower
-    donchian_mid = indicators.donchian_mid[-1] if indicators.donchian_mid else price
-
-    if atr == 0:
-        eval_result.disable_conditions.append("Zero ATR")
-        return eval_result
-
-    # Fade upper Donchian
-    if price >= donchian_upper * 0.998:
-        eval_result.is_applicable = True
-        eval_result.direction = "short"
-        eval_result.entry_price = price
-        eval_result.stop_price = round(price + 1.5 * atr, 6)
-        eval_result.targets = [
-            donchian_mid,
-            round(donchian_lower + (donchian_upper - donchian_lower) * 0.3, 6),
-            donchian_lower,
-        ]
-        eval_result.confidence = 0.6
-        eval_result.trigger_conditions = [
-            f"Price ({price:.3f}) near Donchian upper ({donchian_upper:.3f})",
-            "Low volatility range regime",
-        ]
-
-    # Fade lower Donchian
-    elif price <= donchian_lower * 1.002:
-        eval_result.is_applicable = True
-        eval_result.direction = "long"
-        eval_result.entry_price = price
-        eval_result.stop_price = round(price - 1.5 * atr, 6)
-        eval_result.targets = [
-            donchian_mid,
-            round(donchian_upper - (donchian_upper - donchian_lower) * 0.3, 6),
-            donchian_upper,
-        ]
-        eval_result.confidence = 0.6
-        eval_result.trigger_conditions = [
-            f"Price ({price:.3f}) near Donchian lower ({donchian_lower:.3f})",
-            "Low volatility range regime",
-        ]
-
-    eval_result.invalidation_conditions = [
-        "Breakout beyond Donchian + 1 ATR",
-        "Regime shift to trend",
-    ]
-
-    return eval_result
-
-
-def evaluate_event_momentum(
-    indicators: IndicatorResult,
-    price: float,
-    atr: float,
-) -> StrategyEvaluation:
-    """EventMomentum: macro event breakout continuation, volatility expansion."""
-    eval_result = StrategyEvaluation(strategy_name=StrategyName.EVENT_MOMENTUM.value)
-
-    if not indicators.is_valid:
-        eval_result.disable_conditions.append("Invalid indicators")
-        return eval_result
-
-    bb_upper = indicators.bollinger_upper[-1] if indicators.bollinger_upper else 0
-    bb_lower = indicators.bollinger_lower[-1] if indicators.bollinger_lower else 0
-
-    if atr == 0:
-        eval_result.disable_conditions.append("Zero ATR")
-        return eval_result
-
-    # Bullish breakout beyond upper Bollinger
-    if price > bb_upper and bb_upper > 0:
-        eval_result.is_applicable = True
-        eval_result.direction = "long"
-        eval_result.entry_price = price
-        eval_result.stop_price = round(price - 2.5 * atr, 6)
-        eval_result.targets = [
-            round(price + 2 * atr, 6),
-            round(price + 3.5 * atr, 6),
-            round(price + 5 * atr, 6),
-        ]
-        eval_result.confidence = 0.7
-        eval_result.trigger_conditions = [
-            f"Price ({price:.3f}) > Bollinger upper ({bb_upper:.3f})",
-            "Event regime active",
-        ]
-
-    # Bearish breakout beyond lower Bollinger
-    elif price < bb_lower and bb_lower > 0:
-        eval_result.is_applicable = True
-        eval_result.direction = "short"
-        eval_result.entry_price = price
-        eval_result.stop_price = round(price + 2.5 * atr, 6)
-        eval_result.targets = [
-            round(price - 2 * atr, 6),
-            round(price - 3.5 * atr, 6),
-            round(price - 5 * atr, 6),
-        ]
-        eval_result.confidence = 0.7
-        eval_result.trigger_conditions = [
-            f"Price ({price:.3f}) < Bollinger lower ({bb_lower:.3f})",
-            "Event regime active",
-        ]
-
-    eval_result.invalidation_conditions = [
-        "Price reversal back inside Bollinger bands",
-        "Volume collapse post-event",
-    ]
-
-    return eval_result
-
-
-def evaluate_event_fade(
-    indicators: IndicatorResult,
-    price: float,
-    atr: float,
-) -> StrategyEvaluation:
-    """EventFade: post-event exhaustion fade, ATR exhaustion logic."""
-    eval_result = StrategyEvaluation(strategy_name=StrategyName.EVENT_FADE.value)
-
-    if not indicators.is_valid:
-        eval_result.disable_conditions.append("Invalid indicators")
-        return eval_result
-
-    if atr == 0:
-        eval_result.disable_conditions.append("Zero ATR")
-        return eval_result
-
-    bb_upper = indicators.bollinger_upper[-1] if indicators.bollinger_upper else 0
-    bb_lower = indicators.bollinger_lower[-1] if indicators.bollinger_lower else 0
-    bb_mid = indicators.bollinger_mid[-1] if indicators.bollinger_mid else price
-
-    # Exhaustion at upper extreme (fade short)
-    if price > bb_upper * 1.005 and bb_upper > 0:
-        eval_result.is_applicable = True
-        eval_result.direction = "short"
-        eval_result.entry_price = price
-        eval_result.stop_price = round(price + 1.5 * atr, 6)
-        eval_result.targets = [
-            bb_upper,
-            bb_mid,
-            round(bb_mid - 0.5 * (bb_upper - bb_mid), 6),
-        ]
-        eval_result.confidence = 0.55
-        eval_result.trigger_conditions = [
-            f"Exhaustion: price ({price:.3f}) > 1.005 * BB upper ({bb_upper:.3f})",
-            "ATR elevated (post-event)",
-        ]
-
-    # Exhaustion at lower extreme (fade long)
-    elif price < bb_lower * 0.995 and bb_lower > 0:
-        eval_result.is_applicable = True
-        eval_result.direction = "long"
-        eval_result.entry_price = price
-        eval_result.stop_price = round(price - 1.5 * atr, 6)
-        eval_result.targets = [
-            bb_lower,
-            bb_mid,
-            round(bb_mid + 0.5 * (bb_mid - bb_lower), 6),
-        ]
-        eval_result.confidence = 0.55
-        eval_result.trigger_conditions = [
-            f"Exhaustion: price ({price:.3f}) < 0.995 * BB lower ({bb_lower:.3f})",
-            "ATR elevated (post-event)",
-        ]
-
-    eval_result.invalidation_conditions = [
-        "Continued momentum beyond 3 ATR",
-        "New event catalyst",
-    ]
-    eval_result.caution_reasons.append("Counter-trend — reduced sizing recommended")
-
-    return eval_result
-
-
-def evaluate_volatility_fade(
-    indicators: IndicatorResult,
-    price: float,
-    atr: float,
-) -> StrategyEvaluation:
-    """VolatilityFade: high ATR mean reversion, volatility normalization."""
-    eval_result = StrategyEvaluation(strategy_name=StrategyName.VOLATILITY_FADE.value)
-
-    if not indicators.is_valid:
-        eval_result.disable_conditions.append("Invalid indicators")
-        return eval_result
-
-    if atr == 0:
-        eval_result.disable_conditions.append("Zero ATR")
-        return eval_result
-
-    sma_slow = indicators.sma_slow[-1] if indicators.sma_slow else price
-
-    # Price extended above mean — fade short
-    if price > sma_slow + 2 * atr:
-        eval_result.is_applicable = True
-        eval_result.direction = "short"
-        eval_result.entry_price = price
-        eval_result.stop_price = round(price + 1.5 * atr, 6)
-        eval_result.targets = [
-            round(sma_slow + atr, 6),
-            sma_slow,
-            round(sma_slow - 0.5 * atr, 6),
-        ]
-        eval_result.confidence = 0.5
-        eval_result.trigger_conditions = [
-            f"Price ({price:.3f}) > SMA slow + 2*ATR ({sma_slow + 2 * atr:.3f})",
-            "High volatility regime",
-        ]
-
-    # Price extended below mean — fade long
-    elif price < sma_slow - 2 * atr:
-        eval_result.is_applicable = True
-        eval_result.direction = "long"
-        eval_result.entry_price = price
-        eval_result.stop_price = round(price - 1.5 * atr, 6)
-        eval_result.targets = [
-            round(sma_slow - atr, 6),
-            sma_slow,
-            round(sma_slow + 0.5 * atr, 6),
-        ]
-        eval_result.confidence = 0.5
-        eval_result.trigger_conditions = [
-            f"Price ({price:.3f}) < SMA slow - 2*ATR ({sma_slow - 2 * atr:.3f})",
-            "High volatility regime",
-        ]
-
-    eval_result.invalidation_conditions = [
-        "Trend confirmation (MA crossover in same direction)",
-        "Continued volatility expansion",
-    ]
-    eval_result.caution_reasons.append("Mean reversion in high vol — tight sizing required")
-
-    return eval_result
-
-
-def evaluate_curve_steepener(
-    indicators: IndicatorResult,
-    spread_bp: float,
-    atr: float,
-) -> StrategyEvaluation:
+    Entry : Price crosses above / below EMA21 with elevated ATR.
+    Stop  : 2× ATR from entry.
+    Target: Next Donchian level or 3× ATR (whichever is closer to entry).
     """
-    CurveSteepener: spread widening logic.
-    below lower Donchian AND delta < -1 ATR
+
+    name: str = "TrendFedRepricing"
+    description: str = (
+        "Trend-following strategy using EMA21 crossover with ATR "
+        "confirmation, targeting Donchian channel levels."
+    )
+    applicable_regimes: list[MarketRegime] = field(
+        default_factory=lambda: [MarketRegime.TREND]
+    )
+    applicable_products: list[str] = field(
+        default_factory=lambda: ["outright", "spread"]
+    )
+    priority: int = 1
+    risk_multiplier: float = 1.0
+    volatility_suitability: list[str] = field(
+        default_factory=lambda: ["medium", "high"]
+    )
+
+    def evaluate(
+        self,
+        bars: list[OHLCVBar],
+        indicators: dict[str, Any],
+        regime: RegimeState,
+    ) -> SignalParams | None:
+        if regime.regime in (MarketRegime.EVENT, MarketRegime.RANGE):
+            return None
+
+        ema = indicators.get("ema", [])
+        atr = indicators.get("atr", [])
+        atr_sma = indicators.get("atr_sma", [])
+        donchian = indicators.get("donchian", {})
+
+        latest_ema = _last_valid(ema)
+        prev_ema = _last_valid(ema, 1)
+        latest_atr = _last_valid(atr)
+        latest_atr_sma = _last_valid(atr_sma)
+        donchian_upper = _last_valid(donchian.get("upper", []))
+        donchian_lower = _last_valid(donchian.get("lower", []))
+
+        if any(v is None for v in [latest_ema, prev_ema, latest_atr, latest_atr_sma]):
+            return None
+
+        # Need at least 2 bars for crossover check
+        if len(bars) < 2:
+            return None
+
+        current_close = bars[-1].close
+        prev_close = bars[-2].close
+
+        # ATR confirmation: current ATR must be above ATR-SMA
+        if latest_atr <= latest_atr_sma:  # type: ignore[operator]
+            return None
+
+        atr_ratio = latest_atr / latest_atr_sma  # type: ignore[operator]
+
+        # ── LONG signal: price crosses above EMA21 ──
+        if prev_close <= prev_ema and current_close > latest_ema:  # type: ignore[operator]
+            entry = current_close
+            stop = entry - 2.0 * latest_atr  # type: ignore[operator]
+            # Target: Donchian upper or 3x ATR, whichever closer
+            target_atr = entry + 3.0 * latest_atr  # type: ignore[operator]
+            target_donchian = donchian_upper if donchian_upper is not None else target_atr
+            target = min(target_atr, target_donchian) if target_donchian > entry else target_atr  # type: ignore[operator]
+            if target <= entry:
+                target = target_atr
+
+            confidence = min(0.90, 0.50 + (atr_ratio - 1.0) * 0.25)
+            return SignalParams(
+                direction="long",
+                entry_price=entry,
+                stop_price=stop,
+                target_price=target,
+                confidence=confidence,
+                reason=(
+                    f"Bullish EMA21 crossover: close {current_close:.4f} > "
+                    f"EMA {latest_ema:.4f}, ATR ratio {atr_ratio:.2f}"
+                ),
+                risk_multiplier=self.risk_multiplier,
+            )
+
+        # ── SHORT signal: price crosses below EMA21 ──
+        if prev_close >= prev_ema and current_close < latest_ema:  # type: ignore[operator]
+            entry = current_close
+            stop = entry + 2.0 * latest_atr  # type: ignore[operator]
+            target_atr = entry - 3.0 * latest_atr  # type: ignore[operator]
+            target_donchian = donchian_lower if donchian_lower is not None else target_atr
+            target = max(target_atr, target_donchian) if target_donchian < entry else target_atr  # type: ignore[operator]
+            if target >= entry:
+                target = target_atr
+
+            confidence = min(0.90, 0.50 + (atr_ratio - 1.0) * 0.25)
+            return SignalParams(
+                direction="short",
+                entry_price=entry,
+                stop_price=stop,
+                target_price=target,
+                confidence=confidence,
+                reason=(
+                    f"Bearish EMA21 crossover: close {current_close:.4f} < "
+                    f"EMA {latest_ema:.4f}, ATR ratio {atr_ratio:.2f}"
+                ),
+                risk_multiplier=self.risk_multiplier,
+            )
+
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 2. Mean Reversion Range
+# ══════════════════════════════════════════════════════════════════════
+
+@dataclass
+class MeanReversionRange(StrategyDefinition):
+    """Mean-reversion at Bollinger extremes during range regimes.
+
+    Entry : Price touches Bollinger band.
+    Stop  : Beyond the band by 1× ATR.
+    Target: Opposite Bollinger band or middle band.
     """
-    eval_result = StrategyEvaluation(strategy_name=StrategyName.CURVE_STEEPENER.value)
 
-    if not indicators.is_valid:
-        eval_result.disable_conditions.append("Invalid indicators")
-        return eval_result
+    name: str = "MeanReversionRange"
+    description: str = (
+        "Mean-reversion strategy fading Bollinger band touches "
+        "in range-bound markets."
+    )
+    applicable_regimes: list[MarketRegime] = field(
+        default_factory=lambda: [MarketRegime.RANGE]
+    )
+    applicable_products: list[str] = field(
+        default_factory=lambda: ["outright", "spread"]
+    )
+    priority: int = 2
+    risk_multiplier: float = 0.8
+    volatility_suitability: list[str] = field(
+        default_factory=lambda: ["low", "medium"]
+    )
 
-    if atr == 0:
-        eval_result.disable_conditions.append("Zero ATR")
-        return eval_result
+    def evaluate(
+        self,
+        bars: list[OHLCVBar],
+        indicators: dict[str, Any],
+        regime: RegimeState,
+    ) -> SignalParams | None:
+        if regime.regime in (MarketRegime.TREND, MarketRegime.EVENT):
+            return None
 
-    donchian_lower = indicators.current_donchian_lower
-    donchian_upper = indicators.current_donchian_upper
-    donchian_mid = indicators.donchian_mid[-1] if indicators.donchian_mid else spread_bp
+        bollinger = indicators.get("bollinger", {})
+        atr = indicators.get("atr", [])
+        dcw = indicators.get("dcw", [])
 
-    delta = indicators.spread_delta[-1] if indicators.spread_delta else 0.0
+        bb_upper = _last_valid(bollinger.get("upper", []))
+        bb_lower = _last_valid(bollinger.get("lower", []))
+        bb_mid = _last_valid(bollinger.get("mid", []))
+        latest_atr = _last_valid(atr)
+        latest_dcw = _last_valid(dcw)
 
-    # Steepener: below lower Donchian AND delta < -1 ATR
-    if spread_bp <= donchian_lower and delta < -atr:
-        eval_result.is_applicable = True
-        eval_result.direction = "short"  # selling spread = steepener
-        eval_result.entry_price = spread_bp
-        eval_result.stop_price = round(spread_bp + 2 * atr, 4)
-        eval_result.targets = [
-            round(spread_bp - 1.5 * atr, 4),
-            round(spread_bp - 2.5 * atr, 4),
-            round(spread_bp - 4 * atr, 4),
-        ]
-        eval_result.confidence = 0.65
-        eval_result.trigger_conditions = [
-            f"Spread ({spread_bp:.1f} bp) <= Donchian lower ({donchian_lower:.1f} bp)",
-            f"Delta ({delta:.2f}) < -1 ATR ({-atr:.2f})",
-        ]
-        eval_result.metadata = {"delta": delta, "donchian_lower": donchian_lower}
+        if any(v is None for v in [bb_upper, bb_lower, bb_mid, latest_atr]):
+            return None
 
-    eval_result.invalidation_conditions = [
-        "Spread reversal above Donchian mid",
-        "Delta reversal to positive",
-    ]
+        if not bars:
+            return None
 
-    return eval_result
+        current_close = bars[-1].close
+
+        # Confidence based on DCW (tighter range = higher confidence)
+        dcw_confidence = 0.65
+        if latest_dcw is not None and latest_dcw > 0:
+            # Tighter range (lower DCW) → higher confidence
+            dcw_confidence = min(0.90, 0.60 + (0.01 - min(latest_dcw, 0.01)) * 30)
+
+        # ── LONG signal: price at or below lower Bollinger ──
+        if current_close <= bb_lower:  # type: ignore[operator]
+            entry = current_close
+            stop = bb_lower - 1.0 * latest_atr  # type: ignore[operator]
+            target = bb_mid  # type: ignore[assignment]
+            return SignalParams(
+                direction="long",
+                entry_price=entry,
+                stop_price=stop,
+                target_price=target,  # type: ignore[arg-type]
+                confidence=dcw_confidence,
+                reason=(
+                    f"Mean-reversion long at lower Bollinger: close {current_close:.4f} "
+                    f"<= BB lower {bb_lower:.4f}"
+                ),
+                risk_multiplier=self.risk_multiplier,
+            )
+
+        # ── SHORT signal: price at or above upper Bollinger ──
+        if current_close >= bb_upper:  # type: ignore[operator]
+            entry = current_close
+            stop = bb_upper + 1.0 * latest_atr  # type: ignore[operator]
+            target = bb_mid  # type: ignore[assignment]
+            return SignalParams(
+                direction="short",
+                entry_price=entry,
+                stop_price=stop,
+                target_price=target,  # type: ignore[arg-type]
+                confidence=dcw_confidence,
+                reason=(
+                    f"Mean-reversion short at upper Bollinger: close {current_close:.4f} "
+                    f">= BB upper {bb_upper:.4f}"
+                ),
+                risk_multiplier=self.risk_multiplier,
+            )
+
+        return None
 
 
-def evaluate_curve_flattener(
-    indicators: IndicatorResult,
-    spread_bp: float,
-    atr: float,
-) -> StrategyEvaluation:
+# ══════════════════════════════════════════════════════════════════════
+# 3. Event Momentum
+# ══════════════════════════════════════════════════════════════════════
+
+@dataclass
+class EventMomentum(StrategyDefinition):
+    """Breakout beyond Donchian channel after a macro event.
+
+    Entry : Price breaks above/below Donchian channel post-event.
+    Stop  : 1.5× ATR from entry.
+    Target: 2× ATR from entry.
     """
-    CurveFlattener: spread compression logic.
-    above upper Donchian AND delta > +1 ATR
+
+    name: str = "EventMomentum"
+    description: str = (
+        "Event-driven momentum strategy: Donchian breakout after "
+        "FOMC / NFP / CPI release."
+    )
+    applicable_regimes: list[MarketRegime] = field(
+        default_factory=lambda: [MarketRegime.EVENT]
+    )
+    applicable_products: list[str] = field(
+        default_factory=lambda: ["outright"]
+    )
+    priority: int = 3
+    risk_multiplier: float = 0.7
+    volatility_suitability: list[str] = field(
+        default_factory=lambda: ["high"]
+    )
+
+    def evaluate(
+        self,
+        bars: list[OHLCVBar],
+        indicators: dict[str, Any],
+        regime: RegimeState,
+    ) -> SignalParams | None:
+        if regime.regime != MarketRegime.EVENT:
+            return None
+
+        donchian = indicators.get("donchian", {})
+        atr = indicators.get("atr", [])
+
+        don_upper = _last_valid(donchian.get("upper", []))
+        don_lower = _last_valid(donchian.get("lower", []))
+        latest_atr = _last_valid(atr)
+
+        if any(v is None for v in [don_upper, don_lower, latest_atr]):
+            return None
+
+        if not bars:
+            return None
+
+        current_close = bars[-1].close
+
+        # Confidence from regime confidence (proxy for event impact)
+        event_confidence = min(0.85, regime.confidence * 0.9)
+
+        # ── LONG: breakout above Donchian upper ──
+        if current_close > don_upper:  # type: ignore[operator]
+            entry = current_close
+            stop = entry - 1.5 * latest_atr  # type: ignore[operator]
+            target = entry + 2.0 * latest_atr  # type: ignore[operator]
+            return SignalParams(
+                direction="long",
+                entry_price=entry,
+                stop_price=stop,
+                target_price=target,
+                confidence=event_confidence,
+                reason=(
+                    f"Event momentum long: close {current_close:.4f} broke "
+                    f"Donchian upper {don_upper:.4f}"
+                ),
+                risk_multiplier=self.risk_multiplier,
+            )
+
+        # ── SHORT: breakout below Donchian lower ──
+        if current_close < don_lower:  # type: ignore[operator]
+            entry = current_close
+            stop = entry + 1.5 * latest_atr  # type: ignore[operator]
+            target = entry - 2.0 * latest_atr  # type: ignore[operator]
+            return SignalParams(
+                direction="short",
+                entry_price=entry,
+                stop_price=stop,
+                target_price=target,
+                confidence=event_confidence,
+                reason=(
+                    f"Event momentum short: close {current_close:.4f} broke "
+                    f"Donchian lower {don_lower:.4f}"
+                ),
+                risk_multiplier=self.risk_multiplier,
+            )
+
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 4. Event Fade
+# ══════════════════════════════════════════════════════════════════════
+
+@dataclass
+class EventFade(StrategyDefinition):
+    """Fade extreme event-driven moves beyond 2σ.
+
+    Entry : Price > 2 std dev from SMA20 after event.
+    Stop  : 1× ATR beyond entry.
+    Target: SMA20 (mean).
+    Disable: If move continues beyond 3σ.
     """
-    eval_result = StrategyEvaluation(strategy_name=StrategyName.CURVE_FLATTENER.value)
 
-    if not indicators.is_valid:
-        eval_result.disable_conditions.append("Invalid indicators")
-        return eval_result
+    name: str = "EventFade"
+    description: str = (
+        "Fade extreme event-driven moves that push price >2σ from "
+        "the 20-period mean."
+    )
+    applicable_regimes: list[MarketRegime] = field(
+        default_factory=lambda: [MarketRegime.EVENT]
+    )
+    applicable_products: list[str] = field(
+        default_factory=lambda: ["outright"]
+    )
+    priority: int = 4
+    risk_multiplier: float = 0.6
+    volatility_suitability: list[str] = field(
+        default_factory=lambda: ["high"]
+    )
 
-    if atr == 0:
-        eval_result.disable_conditions.append("Zero ATR")
-        return eval_result
+    def evaluate(
+        self,
+        bars: list[OHLCVBar],
+        indicators: dict[str, Any],
+        regime: RegimeState,
+    ) -> SignalParams | None:
+        if regime.regime != MarketRegime.EVENT:
+            return None
 
-    donchian_upper = indicators.current_donchian_upper
-    donchian_lower = indicators.current_donchian_lower
-    donchian_mid = indicators.donchian_mid[-1] if indicators.donchian_mid else spread_bp
+        bollinger = indicators.get("bollinger", {})
+        sma = indicators.get("sma", [])
+        atr = indicators.get("atr", [])
 
-    delta = indicators.spread_delta[-1] if indicators.spread_delta else 0.0
+        bb_upper = _last_valid(bollinger.get("upper", []))
+        bb_lower = _last_valid(bollinger.get("lower", []))
+        bb_mid = _last_valid(bollinger.get("mid", []))
+        latest_sma = _last_valid(sma)
+        latest_atr = _last_valid(atr)
 
-    # Flattener: above upper Donchian AND delta > +1 ATR
-    if spread_bp >= donchian_upper and delta > atr:
-        eval_result.is_applicable = True
-        eval_result.direction = "long"  # buying spread = flattener
-        eval_result.entry_price = spread_bp
-        eval_result.stop_price = round(spread_bp - 2 * atr, 4)
-        eval_result.targets = [
-            round(spread_bp + 1.5 * atr, 4),
-            round(spread_bp + 2.5 * atr, 4),
-            round(spread_bp + 4 * atr, 4),
-        ]
-        eval_result.confidence = 0.65
-        eval_result.trigger_conditions = [
-            f"Spread ({spread_bp:.1f} bp) >= Donchian upper ({donchian_upper:.1f} bp)",
-            f"Delta ({delta:.2f}) > +1 ATR ({atr:.2f})",
-        ]
-        eval_result.metadata = {"delta": delta, "donchian_upper": donchian_upper}
+        if any(v is None for v in [bb_upper, bb_lower, bb_mid, latest_sma, latest_atr]):
+            return None
 
-    eval_result.invalidation_conditions = [
-        "Spread reversal below Donchian mid",
-        "Delta reversal to negative",
-    ]
+        if not bars:
+            return None
 
-    return eval_result
+        current_close = bars[-1].close
+
+        # Compute distance from mean in std-dev units
+        # Bollinger bands at 2σ: half-width = bb_upper - bb_mid
+        bb_half_width = bb_upper - bb_mid  # type: ignore[operator]
+        if bb_half_width <= 0:
+            return None
+
+        one_sigma = bb_half_width / 2.0  # since default Bollinger is 2σ
+        distance_from_mean = abs(current_close - bb_mid)  # type: ignore[operator]
+        sigma_distance = distance_from_mean / one_sigma if one_sigma > 0 else 0.0
+
+        # Disable if beyond 3σ (move too extreme, don't fade)
+        if sigma_distance > 3.0:
+            logger.debug(
+                "event_fade_disabled_3sigma",
+                sigma_distance=sigma_distance,
+            )
+            return None
+
+        # Only trigger above 2σ
+        if sigma_distance < 2.0:
+            return None
+
+        # Confidence based on distance from mean (closer to 2σ = higher confidence)
+        confidence = min(0.80, 0.50 + (3.0 - sigma_distance) * 0.30)
+
+        # ── LONG fade: price far below mean ──
+        if current_close < bb_lower:  # type: ignore[operator]
+            entry = current_close
+            stop = entry - 1.0 * latest_atr  # type: ignore[operator]
+            target = latest_sma  # type: ignore[assignment]
+            return SignalParams(
+                direction="long",
+                entry_price=entry,
+                stop_price=stop,
+                target_price=target,  # type: ignore[arg-type]
+                confidence=confidence,
+                reason=(
+                    f"Event fade long: price {current_close:.4f} is "
+                    f"{sigma_distance:.1f}σ below mean {bb_mid:.4f}"
+                ),
+                risk_multiplier=self.risk_multiplier,
+            )
+
+        # ── SHORT fade: price far above mean ──
+        if current_close > bb_upper:  # type: ignore[operator]
+            entry = current_close
+            stop = entry + 1.0 * latest_atr  # type: ignore[operator]
+            target = latest_sma  # type: ignore[assignment]
+            return SignalParams(
+                direction="short",
+                entry_price=entry,
+                stop_price=stop,
+                target_price=target,  # type: ignore[arg-type]
+                confidence=confidence,
+                reason=(
+                    f"Event fade short: price {current_close:.4f} is "
+                    f"{sigma_distance:.1f}σ above mean {bb_mid:.4f}"
+                ),
+                risk_multiplier=self.risk_multiplier,
+            )
+
+        return None
 
 
-# ── Evaluator Registry ────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# 5. Volatility Fade
+# ══════════════════════════════════════════════════════════════════════
 
-STRATEGY_EVALUATORS = {
-    StrategyName.TREND_FED_REPRICING: evaluate_trend_fed_repricing,
-    StrategyName.MEAN_REVERSION_RANGE: evaluate_mean_reversion_range,
-    StrategyName.EVENT_MOMENTUM: evaluate_event_momentum,
-    StrategyName.EVENT_FADE: evaluate_event_fade,
-    StrategyName.VOLATILITY_FADE: evaluate_volatility_fade,
-    StrategyName.CURVE_STEEPENER: evaluate_curve_steepener,
-    StrategyName.CURVE_FLATTENER: evaluate_curve_flattener,
-}
+@dataclass
+class VolatilityFade(StrategyDefinition):
+    """Fade volatility spikes at Bollinger extremes.
+
+    Entry : Price at Bollinger extreme during volatility regime.
+    Stop  : Beyond Donchian channel.
+    Target: SMA20.
+    Disable: During event regime.
+    """
+
+    name: str = "VolatilityFade"
+    description: str = (
+        "Fade volatility spikes when price reaches Bollinger extremes, "
+        "targeting mean reversion to SMA20."
+    )
+    applicable_regimes: list[MarketRegime] = field(
+        default_factory=lambda: [MarketRegime.VOLATILITY]
+    )
+    applicable_products: list[str] = field(
+        default_factory=lambda: ["outright", "spread"]
+    )
+    priority: int = 5
+    risk_multiplier: float = 0.7
+    volatility_suitability: list[str] = field(
+        default_factory=lambda: ["high"]
+    )
+
+    def evaluate(
+        self,
+        bars: list[OHLCVBar],
+        indicators: dict[str, Any],
+        regime: RegimeState,
+    ) -> SignalParams | None:
+        if regime.regime == MarketRegime.EVENT:
+            return None
+        if regime.regime != MarketRegime.VOLATILITY:
+            return None
+
+        bollinger = indicators.get("bollinger", {})
+        donchian = indicators.get("donchian", {})
+        sma = indicators.get("sma", [])
+        atr = indicators.get("atr", [])
+
+        bb_upper = _last_valid(bollinger.get("upper", []))
+        bb_lower = _last_valid(bollinger.get("lower", []))
+        don_upper = _last_valid(donchian.get("upper", []))
+        don_lower = _last_valid(donchian.get("lower", []))
+        latest_sma = _last_valid(sma)
+        latest_atr = _last_valid(atr)
+
+        if any(v is None for v in [bb_upper, bb_lower, don_upper, don_lower, latest_sma, latest_atr]):
+            return None
+
+        if not bars:
+            return None
+
+        current_close = bars[-1].close
+
+        # Compute vol percentile from ATR history
+        valid_atr = _last_n_valid(atr, 50)
+        vol_percentile = 0.5
+        if len(valid_atr) >= 10:
+            arr = np.array(valid_atr)
+            vol_percentile = float(np.sum(arr <= latest_atr) / len(arr))
+
+        confidence = min(0.85, 0.50 + vol_percentile * 0.30)
+
+        # ── LONG fade: price at lower Bollinger extreme ──
+        if current_close <= bb_lower:  # type: ignore[operator]
+            entry = current_close
+            stop = don_lower - 0.5 * latest_atr  # type: ignore[operator]
+            # Ensure stop is below entry
+            if stop >= entry:
+                stop = entry - 1.0 * latest_atr  # type: ignore[operator]
+            target = latest_sma  # type: ignore[assignment]
+            if target <= entry:  # type: ignore[operator]
+                return None  # no upside
+            return SignalParams(
+                direction="long",
+                entry_price=entry,
+                stop_price=stop,
+                target_price=target,  # type: ignore[arg-type]
+                confidence=confidence,
+                reason=(
+                    f"Volatility fade long: close {current_close:.4f} at "
+                    f"BB lower {bb_lower:.4f}, vol percentile {vol_percentile:.0%}"
+                ),
+                risk_multiplier=self.risk_multiplier,
+            )
+
+        # ── SHORT fade: price at upper Bollinger extreme ──
+        if current_close >= bb_upper:  # type: ignore[operator]
+            entry = current_close
+            stop = don_upper + 0.5 * latest_atr  # type: ignore[operator]
+            if stop <= entry:
+                stop = entry + 1.0 * latest_atr  # type: ignore[operator]
+            target = latest_sma  # type: ignore[assignment]
+            if target >= entry:  # type: ignore[operator]
+                return None  # no downside
+            return SignalParams(
+                direction="short",
+                entry_price=entry,
+                stop_price=stop,
+                target_price=target,  # type: ignore[arg-type]
+                confidence=confidence,
+                reason=(
+                    f"Volatility fade short: close {current_close:.4f} at "
+                    f"BB upper {bb_upper:.4f}, vol percentile {vol_percentile:.0%}"
+                ),
+                risk_multiplier=self.risk_multiplier,
+            )
+
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 6. Curve Steepener
+# ══════════════════════════════════════════════════════════════════════
+
+@dataclass
+class CurveSteepener(StrategyDefinition):
+    """Spread trade: buy front / sell back when spread narrows.
+
+    Entry : Spread narrowing toward historical low.
+    Stop  : Spread tightens further by 1× ATR of spread.
+    Target: Spread widens to SMA20 of spread.
+    Disable: During event regime with dovish bias.
+    """
+
+    name: str = "CurveSteepener"
+    description: str = (
+        "Curve steepener: buy front-month / sell back-month when "
+        "spread narrows toward historical low."
+    )
+    applicable_regimes: list[MarketRegime] = field(
+        default_factory=lambda: [MarketRegime.TREND, MarketRegime.RANGE]
+    )
+    applicable_products: list[str] = field(
+        default_factory=lambda: ["spread"]
+    )
+    priority: int = 6
+    risk_multiplier: float = 0.9
+    volatility_suitability: list[str] = field(
+        default_factory=lambda: ["low", "medium"]
+    )
+
+    def evaluate(
+        self,
+        bars: list[OHLCVBar],
+        indicators: dict[str, Any],
+        regime: RegimeState,
+    ) -> SignalParams | None:
+        # Disable during event regime with dovish bias
+        if regime.regime == MarketRegime.EVENT and regime.bias == MacroBias.DOVISH:
+            return None
+        if regime.regime == MarketRegime.EVENT:
+            return None
+
+        sma = indicators.get("sma", [])
+        atr = indicators.get("atr", [])
+        donchian = indicators.get("donchian", {})
+
+        latest_sma = _last_valid(sma)
+        latest_atr = _last_valid(atr)
+        don_lower = _last_valid(donchian.get("lower", []))
+
+        if any(v is None for v in [latest_sma, latest_atr, don_lower]):
+            return None
+
+        if len(bars) < 20:
+            return None
+
+        current_close = bars[-1].close  # spread price
+
+        # Z-score of spread vs SMA
+        closes = np.array([b.close for b in bars[-50:]], dtype=np.float64)
+        spread_mean = float(np.mean(closes))
+        spread_std = float(np.std(closes, ddof=1)) if len(closes) > 1 else 0.0
+
+        if spread_std <= 0:
+            return None
+
+        z_score = (current_close - spread_mean) / spread_std
+
+        # Steepener fires when spread is narrow (z-score negative, near historical low)
+        if z_score > -1.0:
+            return None  # spread not narrow enough
+
+        # Entry: current spread level (it's narrow, we expect widening)
+        entry = current_close
+        # Stop: spread tightens further by 1× ATR
+        stop = entry - abs(latest_atr)  # type: ignore[operator]
+        # Target: SMA20 of spread
+        target = latest_sma  # type: ignore[assignment]
+
+        if target <= entry:  # type: ignore[operator]
+            return None  # no widening expected
+
+        confidence = min(0.85, 0.45 + abs(z_score) * 0.20)
+
+        return SignalParams(
+            direction="long",  # buy front, sell back → long the spread
+            entry_price=entry,
+            stop_price=stop,
+            target_price=target,  # type: ignore[arg-type]
+            confidence=confidence,
+            reason=(
+                f"Curve steepener: spread {current_close:.4f} narrowed "
+                f"(z-score {z_score:.2f}), target SMA {latest_sma:.4f}"
+            ),
+            risk_multiplier=self.risk_multiplier,
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 7. Curve Flattener
+# ══════════════════════════════════════════════════════════════════════
+
+@dataclass
+class CurveFlattener(StrategyDefinition):
+    """Spread trade: sell front / buy back when spread widens.
+
+    Entry : Spread widening toward historical high.
+    Stop  : Spread widens further by 1× ATR of spread.
+    Target: Spread narrows to SMA20 of spread.
+    Disable: During event regime with hawkish bias.
+    """
+
+    name: str = "CurveFlattener"
+    description: str = (
+        "Curve flattener: sell front-month / buy back-month when "
+        "spread widens toward historical high."
+    )
+    applicable_regimes: list[MarketRegime] = field(
+        default_factory=lambda: [MarketRegime.TREND, MarketRegime.RANGE]
+    )
+    applicable_products: list[str] = field(
+        default_factory=lambda: ["spread"]
+    )
+    priority: int = 7
+    risk_multiplier: float = 0.9
+    volatility_suitability: list[str] = field(
+        default_factory=lambda: ["low", "medium"]
+    )
+
+    def evaluate(
+        self,
+        bars: list[OHLCVBar],
+        indicators: dict[str, Any],
+        regime: RegimeState,
+    ) -> SignalParams | None:
+        # Disable during event regime with hawkish bias
+        if regime.regime == MarketRegime.EVENT and regime.bias == MacroBias.HAWKISH:
+            return None
+        if regime.regime == MarketRegime.EVENT:
+            return None
+
+        sma = indicators.get("sma", [])
+        atr = indicators.get("atr", [])
+        donchian = indicators.get("donchian", {})
+
+        latest_sma = _last_valid(sma)
+        latest_atr = _last_valid(atr)
+        don_upper = _last_valid(donchian.get("upper", []))
+
+        if any(v is None for v in [latest_sma, latest_atr, don_upper]):
+            return None
+
+        if len(bars) < 20:
+            return None
+
+        current_close = bars[-1].close  # spread price
+
+        # Z-score of spread
+        closes = np.array([b.close for b in bars[-50:]], dtype=np.float64)
+        spread_mean = float(np.mean(closes))
+        spread_std = float(np.std(closes, ddof=1)) if len(closes) > 1 else 0.0
+
+        if spread_std <= 0:
+            return None
+
+        z_score = (current_close - spread_mean) / spread_std
+
+        # Flattener fires when spread is wide (z-score positive, near historical high)
+        if z_score < 1.0:
+            return None  # spread not wide enough
+
+        # Entry: current spread level (it's wide, we expect narrowing)
+        entry = current_close
+        # Stop: spread widens further by 1× ATR
+        stop = entry + abs(latest_atr)  # type: ignore[operator]
+        # Target: SMA20 of spread
+        target = latest_sma  # type: ignore[assignment]
+
+        if target >= entry:  # type: ignore[operator]
+            return None  # no narrowing expected
+
+        confidence = min(0.85, 0.45 + abs(z_score) * 0.20)
+
+        return SignalParams(
+            direction="short",  # sell front, buy back → short the spread
+            entry_price=entry,
+            stop_price=stop,
+            target_price=target,  # type: ignore[arg-type]
+            confidence=confidence,
+            reason=(
+                f"Curve flattener: spread {current_close:.4f} widened "
+                f"(z-score {z_score:.2f}), target SMA {latest_sma:.4f}"
+            ),
+            risk_multiplier=self.risk_multiplier,
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Strategy registry
+# ──────────────────────────────────────────────────────────────────────
+
+ALL_STRATEGIES: list[StrategyDefinition] = [
+    TrendFedRepricing(),
+    MeanReversionRange(),
+    EventMomentum(),
+    EventFade(),
+    VolatilityFade(),
+    CurveSteepener(),
+    CurveFlattener(),
+]
+"""All available strategies, ordered by priority (ascending = higher priority)."""
+
+
+def get_strategies() -> list[StrategyDefinition]:
+    """Return a copy of all registered strategies."""
+    return list(ALL_STRATEGIES)

@@ -1,262 +1,291 @@
 """
-QH (Quant Hub) API Adapter — external data translation layer.
+QH Market Data Adapter.
 
-This adapter is the ONLY module that understands the external QH API schema.
-External schemas NEVER leak past this adapter into engine internals.
-
-Responsibilities:
-- HTTP communication with QH API
-- Schema normalization to internal contracts
-- Retry handling and timeout management
-- Response validation and error translation
+Async adapter for fetching OHLCV market data from external APIs.
+Handles retry logic, timeout, schema normalization, and error mapping.
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
-from app.config.settings import QHApiSettings
-from app.contracts.external_api import ExternalAPIError, QHOHLCCandle, QHOHLCProductResponse, QHOHLCResponse
 from app.contracts.market_data import OHLCVBar, Timeframe
+from app.core.exceptions import DataFetchError
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+_TIMEFRAME_MAP: dict[str, str] = {
+    "1M": "1min",
+    "5M": "5min",
+    "15M": "15min",
+    "1H": "1hour",
+    "4H": "4hour",
+    "1D": "1day",
+}
 
-class QHAdapterError(Exception):
-    """Raised when QH API communication fails."""
-
-    def __init__(self, message: str, error: Optional[ExternalAPIError] = None):
-        self.message = message
-        self.error = error
-        super().__init__(message)
+_MAX_RETRIES: int = 3
+_BASE_DELAY: float = 1.0
+_DEFAULT_TIMEOUT: float = 30.0
 
 
 class QHAdapter:
-    """
-    Adapter for Quant Hub OHLCV API.
+    """Async adapter for external market data API with retry and normalization."""
 
-    Translates external QH API responses to internal OHLCVBar contracts.
-    Handles retries, timeouts, and schema normalization.
-    """
-
-    MAX_RETRIES = 3
-    RETRY_BACKOFF_SECONDS = 1.0
-
-    def __init__(self, settings: QHApiSettings) -> None:
-        self._settings = settings
-        self._client: Optional[httpx.AsyncClient] = None
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create the async HTTP client."""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                base_url=self._settings.base_url,
-                timeout=httpx.Timeout(self._settings.timeout_seconds),
-                headers=self._build_headers(),
-            )
-        return self._client
-
-    def _build_headers(self) -> dict[str, str]:
-        """Build request headers with Bearer auth."""
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
-        if self._settings.api_token:
-            headers["Authorization"] = f"Bearer {self._settings.api_token}"
-        return headers
-
-    async def fetch_ohlcv(
+    def __init__(
         self,
-        products: list[str],
-        timeframe: Timeframe,
-        bar_count: Optional[int] = None,
-    ) -> dict[str, list[OHLCVBar]]:
-        """
-        Fetch OHLCV data from QH API and normalize to internal contracts.
-
-        Args:
-            products: List of product symbols to fetch
-            timeframe: Desired timeframe
-            bar_count: Optional number of bars to request
-
-        Returns:
-            Dict mapping product symbol to list of normalized OHLCVBar
-
-        Raises:
-            QHAdapterError: On communication or validation failure
-        """
-        logger.info(
-            "fetching_ohlcv",
-            products=products,
-            timeframe=timeframe.value,
-            bar_count=bar_count,
-        )
-
-        params = self._build_params(products, timeframe, bar_count)
-        raw_response = await self._execute_request(params)
-        parsed = self._parse_response(raw_response)
-        normalized = self._normalize_response(parsed, timeframe)
-
-        logger.info(
-            "ohlcv_fetched",
-            products=list(normalized.keys()),
-            bar_counts={k: len(v) for k, v in normalized.items()},
-        )
-
-        return normalized
-
-    def _build_params(
-        self,
-        products: list[str],
-        timeframe: Timeframe,
-        bar_count: Optional[int],
-    ) -> dict[str, str]:
-        """Build query parameters for QH API request."""
-        params: dict[str, str] = {
-            "products": ",".join(products),
-            "timeIntervals": timeframe.value,
-        }
-        if bar_count is not None:
-            params["limit"] = str(bar_count)
-        return params
-
-    async def _execute_request(
-        self,
-        params: dict[str, str],
-    ) -> dict[str, Any]:
-        """
-        Execute HTTP GET with retry logic.
-
-        Returns raw JSON response dict.
-        """
-        client = await self._get_client()
-        last_error: Optional[Exception] = None
-
-        for attempt in range(1, self.MAX_RETRIES + 1):
-            try:
-                response = await client.get(
-                    self._settings.ohlc_endpoint,
-                    params=params,
-                )
-
-                if response.status_code != 200:
-                    error = ExternalAPIError(
-                        source="QH_API",
-                        status_code=response.status_code,
-                        message=f"HTTP {response.status_code}",
-                        raw_response=response.text[:500],
-                    )
-                    raise QHAdapterError(
-                        f"QH API returned {response.status_code}",
-                        error=error,
-                    )
-
-                return response.json()
-
-            except httpx.TimeoutException as e:
-                last_error = e
-                logger.warning(
-                    "qh_api_timeout",
-                    attempt=attempt,
-                    max_retries=self.MAX_RETRIES,
-                )
-                if attempt < self.MAX_RETRIES:
-                    import asyncio
-                    await asyncio.sleep(self.RETRY_BACKOFF_SECONDS * attempt)
-
-            except httpx.HTTPError as e:
-                last_error = e
-                logger.error(
-                    "qh_api_http_error",
-                    attempt=attempt,
-                    error=str(e),
-                )
-                if attempt < self.MAX_RETRIES:
-                    import asyncio
-                    await asyncio.sleep(self.RETRY_BACKOFF_SECONDS * attempt)
-
-        raise QHAdapterError(
-            f"QH API request failed after {self.MAX_RETRIES} retries: {last_error}"
-        )
-
-    def _parse_response(self, raw: dict[str, Any]) -> QHOHLCResponse:
-        """Parse raw JSON into external API contract."""
-        try:
-            return QHOHLCResponse.model_validate(raw)
-        except Exception as e:
-            raise QHAdapterError(f"Failed to parse QH API response: {e}")
-
-    def _normalize_response(
-        self,
-        response: QHOHLCResponse,
-        timeframe: Timeframe,
-    ) -> dict[str, list[OHLCVBar]]:
-        """
-        Normalize external QH response to internal OHLCVBar contracts.
-
-        - Reverses newest-first ordering to oldest-first
-        - Maps external schema fields to internal contract fields
-        - Validates candle structure
-        """
-        result: dict[str, list[OHLCVBar]] = {}
-
-        for product_data in response.data:
-            bars: list[OHLCVBar] = []
-
-            # QH API returns newest first — reverse to oldest first
-            candles = list(reversed(product_data.candles))
-
-            for candle in candles:
-                try:
-                    bar = self._candle_to_bar(candle, product_data.product, timeframe)
-                    bars.append(bar)
-                except Exception as e:
-                    logger.warning(
-                        "candle_normalization_skipped",
-                        product=product_data.product,
-                        timestamp=str(candle.t),
-                        error=str(e),
-                    )
-
-            if bars:
-                result[product_data.product] = bars
-            else:
-                logger.warning(
-                    "empty_product_data",
-                    product=product_data.product,
-                )
-
-        return result
-
-    @staticmethod
-    def _candle_to_bar(
-        candle: QHOHLCCandle,
-        product: str,
-        timeframe: Timeframe,
-    ) -> OHLCVBar:
-        """Convert a single external candle to internal OHLCVBar."""
-        timestamp = candle.t
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
-
-        return OHLCVBar(
-            timestamp=timestamp,
-            open=candle.o,
-            high=candle.h,
-            low=candle.l,
-            close=candle.c,
-            volume=candle.v,
-            timeframe=timeframe,
-            product=product,
+        base_url: str,
+        api_key: str,
+        client: httpx.AsyncClient | None = None,
+        timeout: float = _DEFAULT_TIMEOUT,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
+        self._timeout = timeout
+        self._owns_client = client is None
+        self._client = client or httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+                "User-Agent": "ZQ-StrategyPlanner/1.0",
+            },
         )
 
     async def close(self) -> None:
-        """Close the HTTP client."""
-        if self._client and not self._client.is_closed:
+        """Close the underlying HTTP client if we own it."""
+        if self._owns_client and self._client:
             await self._client.aclose()
-            self._client = None
+            logger.info("qh_adapter_closed")
+
+    async def fetch_ohlcv(
+        self,
+        product: str,
+        timeframe: str,
+        limit: int = 200,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+    ) -> list[OHLCVBar]:
+        """
+        Fetch OHLCV bars from the external market data API.
+
+        Args:
+            product: Contract symbol (e.g., 'FFN25').
+            timeframe: Bar timeframe (e.g., '1H').
+            limit: Maximum number of bars to fetch.
+            start_time: Optional start time filter.
+            end_time: Optional end time filter.
+
+        Returns:
+            List of normalized OHLCVBar objects.
+
+        Raises:
+            DataFetchError: On network, timeout, or API errors after retries.
+        """
+        tf_api = _TIMEFRAME_MAP.get(timeframe, timeframe)
+
+        params: dict[str, Any] = {
+            "symbol": product,
+            "interval": tf_api,
+            "limit": min(limit, 1000),
+        }
+
+        if start_time is not None:
+            params["start"] = int(start_time.timestamp())
+        if end_time is not None:
+            params["end"] = int(end_time.timestamp())
+
+        url = f"{self._base_url}/v1/ohlcv"
+
+        logger.info(
+            "fetch_ohlcv_request",
+            product=product,
+            timeframe=timeframe,
+            limit=limit,
+            url=url,
+        )
+
+        raw_bars = await self._request_with_retry("GET", url, params=params)
+        bars = self._normalize_bars(raw_bars, product, timeframe)
+
+        logger.info(
+            "fetch_ohlcv_response",
+            product=product,
+            timeframe=timeframe,
+            bars_count=len(bars),
+        )
+
+        return bars
+
+    async def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Execute HTTP request with exponential backoff retry."""
+        last_error: Exception | None = None
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                response = await self._client.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    json=json_body,
+                )
+
+                if response.status_code == 429:
+                    retry_after = float(response.headers.get("Retry-After", _BASE_DELAY * attempt))
+                    logger.warning(
+                        "rate_limited",
+                        attempt=attempt,
+                        retry_after=retry_after,
+                    )
+                    await asyncio.sleep(retry_after)
+                    continue
+
+                response.raise_for_status()
+                data = response.json()
+
+                if isinstance(data, list):
+                    return data
+                elif isinstance(data, dict):
+                    return data.get("data", data.get("bars", data.get("results", [data])))
+                else:
+                    return []
+
+            except httpx.TimeoutException as exc:
+                last_error = exc
+                logger.warning(
+                    "request_timeout",
+                    attempt=attempt,
+                    url=url,
+                    error=str(exc),
+                )
+
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                logger.error(
+                    "http_error",
+                    attempt=attempt,
+                    url=url,
+                    status_code=exc.response.status_code,
+                    body=exc.response.text[:500],
+                )
+                if exc.response.status_code < 500:
+                    raise DataFetchError(
+                        message=f"API returned {exc.response.status_code}",
+                        source="qh_adapter",
+                        details={"status": exc.response.status_code, "body": exc.response.text[:500]},
+                    )
+
+            except httpx.RequestError as exc:
+                last_error = exc
+                logger.warning(
+                    "request_error",
+                    attempt=attempt,
+                    url=url,
+                    error=str(exc),
+                )
+
+            if attempt < _MAX_RETRIES:
+                delay = _BASE_DELAY * (2 ** (attempt - 1))
+                logger.info("retry_backoff", delay=delay, attempt=attempt)
+                await asyncio.sleep(delay)
+
+        raise DataFetchError(
+            message=f"Failed after {_MAX_RETRIES} retries",
+            source="qh_adapter",
+            details={"url": url, "last_error": str(last_error)},
+        )
+
+    def _normalize_bars(
+        self,
+        raw_bars: list[dict[str, Any]],
+        product: str,
+        timeframe: str,
+    ) -> list[OHLCVBar]:
+        """Normalize raw API response into OHLCVBar objects."""
+        bars: list[OHLCVBar] = []
+
+        for raw in raw_bars:
+            try:
+                bar = self._normalize_bar(raw, product, timeframe)
+                bars.append(bar)
+            except (KeyError, ValueError, TypeError) as exc:
+                logger.warning(
+                    "bar_normalization_failed",
+                    raw=str(raw)[:200],
+                    error=str(exc),
+                )
+                continue
+
+        bars.sort(key=lambda b: b.timestamp)
+        return bars
+
+    def _normalize_bar(
+        self,
+        raw: dict[str, Any],
+        product: str,
+        timeframe: str,
+    ) -> OHLCVBar:
+        """Normalize a single raw bar into an OHLCVBar."""
+        timestamp = self._parse_timestamp(
+            raw.get("timestamp") or raw.get("time") or raw.get("t") or raw.get("date")
+        )
+
+        open_price = float(raw.get("open") or raw.get("o", 0))
+        high_price = float(raw.get("high") or raw.get("h", 0))
+        low_price = float(raw.get("low") or raw.get("l", 0))
+        close_price = float(raw.get("close") or raw.get("c", 0))
+        volume = int(float(raw.get("volume") or raw.get("v", 0)))
+
+        # Ensure OHLC consistency
+        high_price = max(high_price, open_price, close_price)
+        low_price = min(low_price, open_price, close_price)
+
+        return OHLCVBar(
+            timestamp=timestamp,
+            open=open_price,
+            high=high_price,
+            low=low_price,
+            close=close_price,
+            volume=volume,
+            timeframe=Timeframe(timeframe),
+            product=product,
+        )
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> datetime:
+        """Parse various timestamp formats into datetime."""
+        if value is None:
+            return datetime.now(timezone.utc)
+
+        if isinstance(value, (int, float)):
+            if value > 1e12:
+                value = value / 1000
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+
+        if isinstance(value, str):
+            for fmt in (
+                "%Y-%m-%dT%H:%M:%SZ",
+                "%Y-%m-%dT%H:%M:%S.%fZ",
+                "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d",
+            ):
+                try:
+                    dt = datetime.strptime(value, fmt)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return dt
+                except ValueError:
+                    continue
+
+        raise ValueError(f"Cannot parse timestamp: {value!r}")

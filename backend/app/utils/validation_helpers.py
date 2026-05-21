@@ -1,133 +1,89 @@
-"""
-Data validation helpers — bar validation, candle integrity, series checks.
+"""Validation helper functions for ZQ Strategy Planning Platform.
+
+Reusable validation functions that raise descriptive errors
+for common input validation patterns across the platform.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from typing import Any
 
-from app.contracts.market_data import OHLCVBar
-from app.utils.datetime_helpers import bars_are_monotonic, find_duplicate_timestamps
-
-
-class ValidationError(Exception):
-    """Custom validation error for market data."""
-
-    def __init__(self, message: str, field: str = "", details: dict | None = None):
-        self.message = message
-        self.field = field
-        self.details = details or {}
-        super().__init__(message)
+_VALID_TIMEFRAMES = {"1M", "5M", "15M", "1H", "4H", "1D"}
 
 
-class ValidationWarning:
-    """Non-fatal validation warning."""
+def validate_bars_minimum(bars: list[Any], minimum: int, context: str) -> bool:
+    """Validate that a list of bars meets the minimum length requirement.
 
-    def __init__(self, message: str, field: str = ""):
-        self.message = message
-        self.field = field
+    Args:
+        bars: List of bar objects (OHLCVBar or similar).
+        minimum: Minimum required number of bars.
+        context: Descriptive context for the error message (e.g. 'ATR calculation').
 
+    Returns:
+        True if validation passes.
 
-def validate_ohlcv_bar(bar: OHLCVBar) -> list[ValidationWarning]:
+    Raises:
+        ValueError: If bars has fewer than minimum elements.
     """
-    Validate a single OHLCV bar for structural integrity.
+    if len(bars) < minimum:
+        raise ValueError(
+            f"Insufficient data for {context}: "
+            f"need at least {minimum} bars, got {len(bars)}"
+        )
+    return True
 
-    Raises ValidationError for fatal issues.
-    Returns list of warnings for non-fatal issues.
+
+def validate_price_positive(price: float, field_name: str) -> float:
+    """Validate that a price value is strictly positive.
+
+    Args:
+        price: The price to validate.
+        field_name: Name of the field for the error message.
+
+    Returns:
+        The validated price.
+
+    Raises:
+        ValueError: If price is not positive.
     """
-    warnings: list[ValidationWarning] = []
-
-    # Fatal checks
-    if bar.high < bar.low:
-        raise ValidationError(
-            f"Invalid OHLC: high ({bar.high}) < low ({bar.low})",
-            field="high/low",
-            details={"product": bar.product, "timestamp": str(bar.timestamp)},
-        )
-
-    if bar.high < bar.open or bar.high < bar.close:
-        raise ValidationError(
-            f"Invalid OHLC: high ({bar.high}) < open ({bar.open}) or close ({bar.close})",
-            field="high",
-            details={"product": bar.product, "timestamp": str(bar.timestamp)},
-        )
-
-    if bar.low > bar.open or bar.low > bar.close:
-        raise ValidationError(
-            f"Invalid OHLC: low ({bar.low}) > open ({bar.open}) or close ({bar.close})",
-            field="low",
-            details={"product": bar.product, "timestamp": str(bar.timestamp)},
-        )
-
-    # Warning checks
-    if bar.volume == 0:
-        warnings.append(ValidationWarning(
-            f"Zero volume for {bar.product} at {bar.timestamp}",
-            field="volume",
-        ))
-
-    bar_range = bar.high - bar.low
-    if bar_range == 0:
-        warnings.append(ValidationWarning(
-            f"Zero range (doji) for {bar.product} at {bar.timestamp}",
-            field="range",
-        ))
-
-    return warnings
+    if price <= 0:
+        raise ValueError(f"{field_name} must be positive, got {price}")
+    return price
 
 
-def validate_bar_series(
-    bars: list[OHLCVBar],
-    min_bars: int = 51,
-) -> tuple[list[ValidationWarning], list[ValidationError]]:
+def validate_tick_size(tick_size: float) -> float:
+    """Validate that a tick size is a positive number.
+
+    Args:
+        tick_size: The tick size to validate.
+
+    Returns:
+        The validated tick size.
+
+    Raises:
+        ValueError: If tick_size is not positive.
     """
-    Validate a series of OHLCV bars.
+    if tick_size <= 0:
+        raise ValueError(f"tick_size must be positive, got {tick_size}")
+    return tick_size
 
-    Returns (warnings, errors).
+
+def validate_timeframe(tf: str) -> str:
+    """Validate that a timeframe string is recognized.
+
+    Args:
+        tf: Timeframe string to validate (e.g. '1H', '5M').
+
+    Returns:
+        The validated timeframe string (uppercased).
+
+    Raises:
+        ValueError: If the timeframe is not in the allowed set.
     """
-    warnings: list[ValidationWarning] = []
-    errors: list[ValidationError] = []
-
-    if len(bars) < min_bars:
-        errors.append(ValidationError(
-            f"Insufficient bars: {len(bars)} < {min_bars} minimum required",
-            field="bar_count",
-        ))
-        return warnings, errors
-
-    # Check monotonicity
-    timestamps = [bar.timestamp for bar in bars]
-    if not bars_are_monotonic(timestamps):
-        errors.append(ValidationError(
-            "Non-monotonic timestamps detected",
-            field="timestamps",
-        ))
-
-    # Check duplicates
-    duplicates = find_duplicate_timestamps(timestamps)
-    if duplicates:
-        errors.append(ValidationError(
-            f"Duplicate timestamps found: {len(duplicates)}",
-            field="timestamps",
-            details={"duplicates": [str(d) for d in duplicates[:5]]},
-        ))
-
-    # Validate each bar
-    for bar in bars:
-        try:
-            bar_warnings = validate_ohlcv_bar(bar)
-            warnings.extend(bar_warnings)
-        except ValidationError as e:
-            errors.append(e)
-
-    return warnings, errors
-
-
-def validate_product_match(bars: list[OHLCVBar], expected_product: str) -> None:
-    """Ensure all bars belong to the expected product."""
-    mismatched = [b for b in bars if b.product != expected_product]
-    if mismatched:
-        raise ValidationError(
-            f"Product mismatch: expected {expected_product}, found {set(b.product for b in mismatched)}",
-            field="product",
+    tf_upper = tf.upper()
+    if tf_upper not in _VALID_TIMEFRAMES:
+        raise ValueError(
+            f"Invalid timeframe: {tf!r}. "
+            f"Allowed: {', '.join(sorted(_VALID_TIMEFRAMES))}"
         )
+    return tf_upper

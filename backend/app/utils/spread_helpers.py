@@ -1,79 +1,98 @@
-"""
-Spread calculation helpers — basis point conversions and spread math.
+"""Spread calculation helper functions for ZQ Strategy Planning Platform.
+
+Pure, stateless functions for Fed Funds spread computations,
+implied rate conversions, and basis point calculations.
 """
 
 from __future__ import annotations
 
-from app.contracts.market_data import OHLCVBar, SpreadBar, Timeframe
 
+def price_to_spread_bp(front_price: float, back_price: float) -> float:
+    """Convert front and back contract prices to spread in basis points.
 
-def price_to_bp(front_price: float, back_price: float) -> float:
+    For Fed Funds Futures, spread = (front_price - back_price) * 100 basis points.
+
+    Args:
+        front_price: Front (nearer expiry) contract price.
+        back_price: Back (farther expiry) contract price.
+
+    Returns:
+        Spread in basis points, rounded to 4 decimal places.
     """
-    Convert outright price differential to basis points.
+    return round((front_price - back_price) * 100, 4)
 
-    spread_bp = (front_price - back_price) * 100
-    1 full price point = 100 basis points
+
+def spread_bp_to_ticks(spread_bp: float, tick_size_bp: float) -> float:
+    """Convert a spread in basis points to a number of ticks.
+
+    Args:
+        spread_bp: Spread value in basis points.
+        tick_size_bp: Tick size in basis points (e.g. 0.5 for ZQ spreads).
+
+    Returns:
+        Number of ticks as a float.
+
+    Raises:
+        ValueError: If tick_size_bp is not positive.
     """
-    return round((front_price - back_price) * 100, 2)
-
-
-def bp_to_price(spread_bp: float) -> float:
-    """Convert basis points back to price differential."""
-    return spread_bp / 100.0
-
-
-def compute_spread_bar(
-    front_bar: OHLCVBar,
-    back_bar: OHLCVBar,
-    spread_symbol: str,
-) -> SpreadBar:
-    """
-    Compute a spread bar from two outright bars.
-
-    All spread values are stored in basis points internally.
-    """
-    return SpreadBar(
-        timestamp=front_bar.timestamp,
-        open_bp=price_to_bp(front_bar.open, back_bar.open),
-        high_bp=price_to_bp(front_bar.high, back_bar.low),  # max spread
-        low_bp=price_to_bp(front_bar.low, back_bar.high),  # min spread
-        close_bp=price_to_bp(front_bar.close, back_bar.close),
-        volume=min(front_bar.volume, back_bar.volume),
-        timeframe=front_bar.timeframe,
-        product=spread_symbol,
-        front_contract=front_bar.product,
-        back_contract=back_bar.product,
-    )
-
-
-def compute_spread_series(
-    front_bars: list[OHLCVBar],
-    back_bars: list[OHLCVBar],
-    spread_symbol: str,
-) -> list[SpreadBar]:
-    """
-    Compute a series of spread bars from aligned outright bar series.
-
-    Both series must have matching timestamps.
-    """
-    if len(front_bars) != len(back_bars):
-        raise ValueError(
-            f"Bar count mismatch: front={len(front_bars)}, back={len(back_bars)}"
-        )
-
-    spread_bars: list[SpreadBar] = []
-    for front, back in zip(front_bars, back_bars):
-        if front.timestamp != back.timestamp:
-            raise ValueError(
-                f"Timestamp mismatch: front={front.timestamp}, back={back.timestamp}"
-            )
-        spread_bars.append(compute_spread_bar(front, back, spread_symbol))
-
-    return spread_bars
-
-
-def spread_ticks_bp(spread_bp_distance: float, tick_size_bp: float = 0.5) -> float:
-    """Convert a spread basis point distance to number of spread ticks."""
     if tick_size_bp <= 0:
         raise ValueError(f"tick_size_bp must be positive, got {tick_size_bp}")
-    return abs(spread_bp_distance) / tick_size_bp
+    return round(spread_bp / tick_size_bp, 6)
+
+
+def spread_ticks_to_dollar(ticks: float, tick_value: float) -> float:
+    """Convert spread ticks to dollar value.
+
+    Args:
+        ticks: Number of ticks (can be fractional).
+        tick_value: Dollar value per tick.
+
+    Returns:
+        Dollar value, rounded to 2 decimal places.
+    """
+    return round(abs(ticks) * tick_value, 2)
+
+
+def implied_rate_from_price(price: float) -> float:
+    """Calculate the implied Fed Funds rate from a futures price.
+
+    Fed Funds Futures are quoted as 100 - rate. So:
+        implied_rate = 100.0 - price
+
+    Args:
+        price: Futures price (e.g. 95.755 implies 4.245% rate).
+
+    Returns:
+        Implied rate as a float (e.g. 4.245).
+    """
+    return round(100.0 - price, 6)
+
+
+def price_from_implied_rate(rate: float) -> float:
+    """Calculate the futures price from an implied Fed Funds rate.
+
+    Args:
+        rate: Implied rate (e.g. 4.245%).
+
+    Returns:
+        Futures price (e.g. 95.755).
+    """
+    return round(100.0 - rate, 6)
+
+
+def rate_change_bp(old_price: float, new_price: float) -> float:
+    """Calculate the change in implied rate between two prices in basis points.
+
+    Since rate = 100 - price, a price decrease = rate increase.
+    rate_change = (old_price - new_price) * 100 basis points.
+
+    Args:
+        old_price: Previous futures price.
+        new_price: Current futures price.
+
+    Returns:
+        Rate change in basis points. Positive means rates rose (price fell).
+    """
+    old_rate = implied_rate_from_price(old_price)
+    new_rate = implied_rate_from_price(new_price)
+    return round((new_rate - old_rate) * 100, 4)

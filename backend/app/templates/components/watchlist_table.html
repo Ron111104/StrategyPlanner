@@ -1,0 +1,90 @@
+<!-- Watchlist Table Component
+  Variables:
+    - watchlist: list of objects with {symbol, last, change, change_pct, spread_bp, atr, regime, signal_direction}
+-->
+<div class="rounded-lg bg-[#1a1f2e] border border-gray-700/50 overflow-hidden">
+  <div class="overflow-x-auto">
+    <table class="w-full text-xs">
+      <thead>
+        <tr class="border-b border-gray-700/50 bg-[#111827]/50">
+          <th class="text-left px-3 py-2 text-[10px] text-gray-500 uppercase tracking-wider font-medium cursor-pointer hover:text-gray-300"
+              hx-get="/api/market-data/watchlist?sort=symbol"
+              hx-target="#watchlist-container"
+              hx-swap="innerHTML"
+          >Symbol</th>
+          <th class="text-right px-3 py-2 text-[10px] text-gray-500 uppercase tracking-wider font-medium cursor-pointer hover:text-gray-300"
+              hx-get="/api/market-data/watchlist?sort=last"
+              hx-target="#watchlist-container"
+              hx-swap="innerHTML"
+          >Last</th>
+          <th class="text-right px-3 py-2 text-[10px] text-gray-500 uppercase tracking-wider font-medium cursor-pointer hover:text-gray-300"
+              hx-get="/api/market-data/watchlist?sort=change"
+              hx-target="#watchlist-container"
+              hx-swap="innerHTML"
+          >Change</th>
+          <th class="text-right px-3 py-2 text-[10px] text-gray-500 uppercase tracking-wider font-medium">Spread BP</th>
+          <th class="text-right px-3 py-2 text-[10px] text-gray-500 uppercase tracking-wider font-medium">ATR</th>
+          <th class="text-center px-3 py-2 text-[10px] text-gray-500 uppercase tracking-wider font-medium">Regime</th>
+          <th class="text-center px-3 py-2 text-[10px] text-gray-500 uppercase tracking-wider font-medium">Signal</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-700/30">
+        {% for item in watchlist | default([]) %}
+        <tr
+          class="hover:bg-gray-700/20 cursor-pointer transition-colors"
+          hx-get="/api/market-data/snapshot/{{ item.symbol }}"
+          hx-target="#market-detail"
+          hx-swap="innerHTML"
+        >
+          <td class="px-3 py-2">
+            <div class="flex items-center gap-2">
+              <span class="w-1.5 h-1.5 rounded-full
+                {% if item.change|default(0)|float > 0 %}bg-emerald-400
+                {% elif item.change|default(0)|float < 0 %}bg-rose-400
+                {% else %}bg-gray-500{% endif %}
+              "></span>
+              <span class="font-mono font-semibold text-gray-200">{{ item.symbol }}</span>
+            </div>
+          </td>
+          <td class="px-3 py-2 text-right font-mono font-semibold text-gray-100">{{ item.last | default("0.0000") }}</td>
+          <td class="px-3 py-2 text-right font-mono font-semibold
+            {% if item.change|default(0)|float > 0 %}text-emerald-400
+            {% elif item.change|default(0)|float < 0 %}text-rose-400
+            {% else %}text-gray-400{% endif %}
+          ">
+            {% if item.change|default(0)|float > 0 %}+{% endif %}{{ item.change | default("0.0000") }}
+            <span class="text-gray-500 ml-1">({% if item.change_pct|default(0)|float > 0 %}+{% endif %}{{ item.change_pct | default("0.00") }}%)</span>
+          </td>
+          <td class="px-3 py-2 text-right font-mono text-gray-300">{{ item.spread_bp | default("—") }}</td>
+          <td class="px-3 py-2 text-right font-mono text-gray-300">{{ item.atr | default("—") }}</td>
+          <td class="px-3 py-2 text-center">
+            <span class="inline-flex px-1.5 py-0.5 rounded text-[10px] font-mono font-medium
+              {% if item.regime == 'TRENDING' %}bg-cyan-400/10 text-cyan-400
+              {% elif item.regime == 'VOLATILE' %}bg-rose-400/10 text-rose-400
+              {% elif item.regime == 'MEAN_REVERT' %}bg-amber-400/10 text-amber-400
+              {% else %}bg-gray-600/20 text-gray-400{% endif %}
+            ">{{ item.regime | default("—") }}</span>
+          </td>
+          <td class="px-3 py-2 text-center">
+            {% if item.signal_direction %}
+              <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono font-bold
+                {% if item.signal_direction == 'LONG' %}bg-emerald-400/10 text-emerald-400
+                {% elif item.signal_direction == 'SHORT' %}bg-rose-400/10 text-rose-400
+                {% else %}bg-gray-600/20 text-gray-500{% endif %}
+              ">{{ item.signal_direction }}</span>
+            {% else %}
+              <span class="text-gray-600">—</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="7" class="px-3 py-8 text-center text-gray-500 text-xs">
+            No instruments in watchlist
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>

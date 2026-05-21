@@ -1,0 +1,251 @@
+{% extends "layouts/base.html" %}
+
+{% block title %}Replay Engine - ZQ Strategy Planner{% endblock %}
+
+{% block content %}
+<div class="p-6 space-y-6" x-data="replayEngine()">
+    <div class="flex items-center justify-between">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-100">Replay Engine</h1>
+            <p class="text-gray-400 text-sm mt-1">Historical playback with signal evaluation</p>
+        </div>
+        <div class="flex items-center gap-2">
+            <span class="text-xs px-2 py-1 rounded" :class="isPlaying ? 'bg-emerald-500/20 text-emerald-400' : 'bg-gray-700 text-gray-400'" x-text="isPlaying ? 'PLAYING' : 'STOPPED'"></span>
+        </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="bg-[#111827] rounded-lg border border-gray-700/50 p-5">
+        <div class="grid grid-cols-2 md:grid-cols-6 gap-4">
+            <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5">Product</label>
+                <select x-model="product" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm">
+                    {% for c in contracts.outrights %}
+                    <option value="{{ c.symbol }}">{{ c.symbol }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5">Timeframe</label>
+                <select x-model="timeframe" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm">
+                    <option value="1H">1 Hour</option>
+                    <option value="4H">4 Hours</option>
+                    <option value="1D">Daily</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5">Start Date</label>
+                <input type="date" x-model="startDate" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm">
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5">End Date</label>
+                <input type="date" x-model="endDate" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm">
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1.5">Speed</label>
+                <select x-model.number="speed" class="w-full bg-[#1a1f2e] border border-gray-600 rounded-md px-3 py-2 text-gray-100 text-sm">
+                    <option value="0.5">0.5x</option>
+                    <option value="1">1x</option>
+                    <option value="2">2x</option>
+                    <option value="5">5x</option>
+                    <option value="10">10x</option>
+                </select>
+            </div>
+            <div class="flex items-end">
+                <button @click="loadData()" class="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-medium py-2 px-4 rounded-md transition-all text-sm">
+                    Load Data
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Playback Controls -->
+    <div class="bg-[#111827] rounded-lg border border-gray-700/50 p-4">
+        <div class="flex items-center justify-center gap-4">
+            <button @click="stepBack()" :disabled="currentBar <= 51" class="p-2 rounded-md bg-gray-700 hover:bg-gray-600 disabled:opacity-30 text-gray-300 transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0019 16V8a1 1 0 00-1.6-.8l-5.333 4zM4.066 11.2a1 1 0 000 1.6l5.334 4A1 1 0 0011 16V8a1 1 0 00-1.6-.8l-5.334 4z"></path></svg>
+            </button>
+            <button @click="togglePlay()" class="p-3 rounded-full transition-colors" :class="isPlaying ? 'bg-rose-600 hover:bg-rose-500' : 'bg-emerald-600 hover:bg-emerald-500'">
+                <svg x-show="!isPlaying" class="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"></path></svg>
+                <svg x-show="isPlaying" class="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"></path></svg>
+            </button>
+            <button @click="stepForward()" :disabled="currentBar >= totalBars - 1" class="p-2 rounded-md bg-gray-700 hover:bg-gray-600 disabled:opacity-30 text-gray-300 transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.933 12.8a1 1 0 000-1.6L6.6 7.2A1 1 0 005 8v8a1 1 0 001.6.8l5.333-4zM19.933 12.8a1 1 0 000-1.6l-5.333-4A1 1 0 0013 8v8a1 1 0 001.6.8l5.333-4z"></path></svg>
+            </button>
+            <button @click="reset()" class="p-2 rounded-md bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+            </button>
+            <div class="ml-4 flex items-center gap-3 text-sm text-gray-400">
+                <span class="font-mono" x-text="'Bar: ' + currentBar + ' / ' + totalBars"></span>
+                <div class="w-48 bg-gray-700 rounded-full h-2">
+                    <div class="bg-cyan-500 h-2 rounded-full transition-all" :style="'width: ' + (totalBars > 0 ? (currentBar / totalBars * 100) : 0) + '%'"></div>
+                </div>
+                <span class="font-mono text-xs" x-text="currentTimestamp || '—'"></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chart & Stats -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div class="lg:col-span-2 bg-[#111827] rounded-lg border border-gray-700/50">
+            <div class="p-4 border-b border-gray-700/50 flex items-center justify-between">
+                <h3 class="text-sm font-medium text-gray-200" x-text="product + ' Replay'"></h3>
+                <span class="text-xs font-mono text-gray-500" x-text="timeframe"></span>
+            </div>
+            <div id="replay-chart" class="h-96"></div>
+        </div>
+
+        <!-- Replay Stats -->
+        <div class="space-y-4">
+            <div class="bg-[#111827] rounded-lg border border-gray-700/50 p-4">
+                <h3 class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">Replay Statistics</h3>
+                <div class="space-y-2 text-sm">
+                    <div class="flex justify-between">
+                        <span class="text-gray-500">Signals Generated</span>
+                        <span class="font-mono text-cyan-400" x-text="signalCount"></span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-500">Long Signals</span>
+                        <span class="font-mono text-emerald-400" x-text="longCount"></span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-500">Short Signals</span>
+                        <span class="font-mono text-rose-400" x-text="shortCount"></span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-500">Current Regime</span>
+                        <span class="font-mono text-gray-300" x-text="currentReplayRegime || '—'"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Active Signal During Replay -->
+            <div x-show="currentSignal" class="bg-[#111827] rounded-lg border border-gray-700/50 p-4">
+                <h3 class="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">Active Signal</h3>
+                <div class="space-y-2 text-sm">
+                    <div class="flex justify-between">
+                        <span class="text-gray-500">Strategy</span>
+                        <span class="text-gray-200" x-text="currentSignal?.strategy_name"></span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-500">Direction</span>
+                        <span :class="currentSignal?.direction === 'long' ? 'text-emerald-400' : 'text-rose-400'" x-text="currentSignal?.direction?.toUpperCase()"></span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-500">Entry</span>
+                        <span class="font-mono text-cyan-400" x-text="currentSignal?.entry_price?.toFixed(3)"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/charts.js"></script>
+<script src="/static/js/replay.js"></script>
+<script>
+function replayEngine() {
+    return {
+        product: '{{ contracts.outrights[0].symbol if contracts.outrights else "" }}',
+        timeframe: '1H',
+        startDate: '',
+        endDate: '',
+        speed: 1,
+        isPlaying: false,
+        currentBar: 0,
+        totalBars: 0,
+        currentTimestamp: null,
+        currentSignal: null,
+        currentReplayRegime: null,
+        signalCount: 0,
+        longCount: 0,
+        shortCount: 0,
+        bars: [],
+        chartManager: null,
+        playInterval: null,
+
+        init() {
+            this.chartManager = new ChartManager('replay-chart');
+        },
+
+        async loadData() {
+            try {
+                const api = new ApiClient();
+                const result = await api.fetchBars(this.product, this.timeframe);
+                if (result && result.length > 0) {
+                    this.bars = result;
+                    this.totalBars = result.length;
+                    this.currentBar = 51;
+                    this.updateChart();
+                    showNotification('Loaded ' + result.length + ' bars', 'success');
+                }
+            } catch (err) {
+                showNotification('Failed to load data: ' + err.message, 'error');
+            }
+        },
+
+        togglePlay() {
+            if (this.isPlaying) {
+                this.pause();
+            } else {
+                this.play();
+            }
+        },
+
+        play() {
+            this.isPlaying = true;
+            this.playInterval = setInterval(() => {
+                if (this.currentBar < this.totalBars - 1) {
+                    this.stepForward();
+                } else {
+                    this.pause();
+                }
+            }, 1000 / this.speed);
+        },
+
+        pause() {
+            this.isPlaying = false;
+            if (this.playInterval) {
+                clearInterval(this.playInterval);
+                this.playInterval = null;
+            }
+        },
+
+        stepForward() {
+            if (this.currentBar < this.totalBars - 1) {
+                this.currentBar++;
+                this.updateChart();
+            }
+        },
+
+        stepBack() {
+            if (this.currentBar > 51) {
+                this.currentBar--;
+                this.updateChart();
+            }
+        },
+
+        reset() {
+            this.pause();
+            this.currentBar = 51;
+            this.signalCount = 0;
+            this.longCount = 0;
+            this.shortCount = 0;
+            this.currentSignal = null;
+            this.updateChart();
+        },
+
+        updateChart() {
+            if (this.bars.length === 0) return;
+            const visibleBars = this.bars.slice(0, this.currentBar + 1);
+            if (visibleBars.length > 0) {
+                const last = visibleBars[visibleBars.length - 1];
+                this.currentTimestamp = last.timestamp || '';
+            }
+        }
+    };
+}
+</script>
+{% endblock %}

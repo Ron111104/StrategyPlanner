@@ -1,94 +1,80 @@
-"""
-Macro inputs and regime domain contracts.
+"""Macro input contract models for ZQ Strategy Planning Platform.
 
-Defines regime classification, macro bias, event windows,
-and all regime-related typed schemas.
+Defines regime state, macro bias, macro events, and regime update
+request models used across the strategy evaluation pipeline.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
-from typing import Optional
+from enum import StrEnum
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
-# ── Regime Enums ──────────────────────────────────────────────
+class MarketRegime(StrEnum):
+    """Market regime classification."""
 
-class MarketRegime(str, Enum):
-    """
-    Supported market regimes.
-    Priority order: event → volatility → trend → range → no_signal
-    """
-    EVENT = "event"
-    VOLATILITY = "volatility"
     TREND = "trend"
     RANGE = "range"
-    NO_SIGNAL = "no_signal"
+    VOLATILITY = "volatility"
+    EVENT = "event"
 
 
-class MacroBias(str, Enum):
-    """Macro directional bias set by trader."""
+class MacroBias(StrEnum):
+    """Directional macro bias for Fed policy expectations."""
+
     HAWKISH = "hawkish"
     DOVISH = "dovish"
     NEUTRAL = "neutral"
 
 
-# ── Macro Event ───────────────────────────────────────────────
-
 class MacroEvent(BaseModel):
-    """Scheduled macro event with impact window."""
-    event_id: str
-    name: str = Field(min_length=1)
-    scheduled_time: datetime
-    impact: str = Field(default="high", pattern=r"^(low|medium|high|critical)$")
-    description: Optional[str] = None
-    lock_window_hours: float = Field(default=4.0, ge=0)
-    volatility_override: Optional[float] = Field(default=None, ge=0)
+    """A scheduled or active macroeconomic event that may impact Fed Funds pricing."""
 
+    model_config = {"frozen": True}
 
-# ── Regime State ──────────────────────────────────────────────
+    event_name: Annotated[str, Field(min_length=1, description="Event name e.g. 'FOMC Decision'")]
+    event_time: datetime
+    impact: Literal["high", "medium", "low"]
+    description: Annotated[str, Field(default="", description="Optional event description")]
+
 
 class RegimeState(BaseModel):
-    """Current regime classification with metadata."""
-    regime: MarketRegime = MarketRegime.NO_SIGNAL
-    macro_bias: MacroBias = MacroBias.NEUTRAL
-    confidence: float = Field(default=0.0, ge=0, le=1.0)
-    is_manual_override: bool = False
-    override_expiration: Optional[datetime] = None
+    """Current market regime state including macro context.
+
+    Tracks the active regime classification, macro bias, confidence level,
+    data source, expiration, and any active macro events.
+    """
+
+    current_regime: MarketRegime
+    macro_bias: MacroBias
+    confidence: Annotated[float, Field(ge=0.0, le=1.0, description="Confidence level 0-1")]
+    source: Literal["manual", "computed"] = "computed"
+    updated_at: datetime
+    expires_at: datetime | None = None
     active_events: list[MacroEvent] = Field(default_factory=list)
-    event_lock_active: bool = False
-    event_lock_expiration: Optional[datetime] = None
-    volatility_level: float = Field(default=1.0, ge=0)
-    classified_at: datetime = Field(default_factory=datetime.utcnow)
-    classification_reason: str = ""
+    volatility_override: bool = False
 
+    @field_validator("confidence")
+    @classmethod
+    def validate_confidence_range(cls, v: float) -> float:
+        """Ensure confidence is clamped to [0.0, 1.0]."""
+        if v < 0.0:
+            return 0.0
+        if v > 1.0:
+            return 1.0
+        return v
 
-# ── Regime Update Request ─────────────────────────────────────
 
 class RegimeUpdateRequest(BaseModel):
-    """Manual regime override request from trader."""
-    regime: Optional[MarketRegime] = None
-    macro_bias: Optional[MacroBias] = None
-    override_expiration_hours: Optional[float] = Field(default=24.0, ge=0)
-    active_events: Optional[list[MacroEvent]] = None
-    force_event_lock: Optional[bool] = None
-    volatility_override: Optional[float] = Field(default=None, ge=0)
+    """Request to update the current regime state.
 
+    All fields are optional — only provided fields will be updated.
+    """
 
-# ── Regime Classification Input ───────────────────────────────
-
-class RegimeClassificationInput(BaseModel):
-    """Input data for rule-based regime classification."""
-    current_atr: float = Field(ge=0)
-    atr_percentile: float = Field(ge=0, le=100)
-    ma_fast: float = Field(gt=0)
-    ma_slow: float = Field(gt=0)
-    price: float = Field(gt=0)
-    spread_bp: Optional[float] = None
-    donchian_upper: float = Field(gt=0)
-    donchian_lower: float = Field(gt=0)
-    dcw: float = Field(ge=0)
-    volume: int = Field(ge=0, default=0)
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    regime: MarketRegime | None = None
+    bias: MacroBias | None = None
+    events: list[MacroEvent] | None = None
+    manual_override: bool = False

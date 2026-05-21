@@ -1,0 +1,24 @@
+{% extends 'layouts/base.html' %}
+
+{#
+  Reusable grid layout template.
+  Variables:
+    - grid_cols: number of columns at xl (default: 4)
+    - grid_cols_lg: number of columns at lg (default: 3)
+    - grid_cols_md: number of columns at md (default: 2)
+    - grid_gap: gap size (default: 4)
+    - page_title: title shown in navbar
+#}
+
+{% set cols = grid_cols | default(4) %}
+{% set cols_lg = grid_cols_lg | default(3) %}
+{% set cols_md = grid_cols_md | default(2) %}
+{% set gap = grid_gap | default(4) %}
+
+{% block content %}
+<div class="grid grid-cols-1 md:grid-cols-{{ cols_md }} lg:grid-cols-{{ cols_lg }} xl:grid-cols-{{ cols }} gap-{{ gap }}">
+  {% block grid_content %}{% endblock %}
+</div>
+
+{% block below_grid %}{% endblock %}
+{% endblock %}
