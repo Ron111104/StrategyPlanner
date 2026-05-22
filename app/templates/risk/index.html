@@ -1,0 +1,183 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<div x-data="riskApp()" x-init="init()">
+    <div class="grid grid-cols-12 gap-4">
+        <!-- Risk Calculator -->
+        <div class="col-span-5 bg-terminal-card border border-terminal-border rounded-lg">
+            <div class="px-4 py-3 border-b border-terminal-border">
+                <span class="text-xs font-bold text-white">Trade Risk Calculator</span>
+            </div>
+            <div class="p-4 space-y-3">
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="text-[10px] text-terminal-muted block mb-1">Product</label>
+                        <select x-model="product" class="w-full bg-gray-800 border border-terminal-border rounded px-2 py-1.5 text-xs text-white focus:border-terminal-accent focus:outline-none">
+                            {% for key, prod in products.items() %}
+                            <option value="{{ key }}">{{ prod.display_name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-terminal-muted block mb-1">Symbol</label>
+                        <input x-model="symbol" type="text" placeholder="FFN26"
+                               class="w-full bg-gray-800 border border-terminal-border rounded px-2 py-1.5 text-xs text-white font-mono focus:border-terminal-accent focus:outline-none">
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="text-[10px] text-terminal-muted block mb-1">Direction</label>
+                        <select x-model="direction" class="w-full bg-gray-800 border border-terminal-border rounded px-2 py-1.5 text-xs text-white focus:border-terminal-accent focus:outline-none">
+                            <option value="long">LONG</option>
+                            <option value="short">SHORT</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-terminal-muted block mb-1">Timeframe</label>
+                        <select x-model="timeframe" class="w-full bg-gray-800 border border-terminal-border rounded px-2 py-1.5 text-xs text-white focus:border-terminal-accent focus:outline-none">
+                            <option value="1H">1H</option>
+                            <option value="4H">4H</option>
+                            <option value="1D">1D</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="grid grid-cols-3 gap-3">
+                    <div>
+                        <label class="text-[10px] text-terminal-muted block mb-1">Entry</label>
+                        <input x-model.number="entry" type="number" step="0.005"
+                               class="w-full bg-gray-800 border border-terminal-border rounded px-2 py-1.5 text-xs text-white font-mono focus:border-terminal-accent focus:outline-none">
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-terminal-muted block mb-1">Stop</label>
+                        <input x-model.number="stop" type="number" step="0.005"
+                               class="w-full bg-gray-800 border border-terminal-border rounded px-2 py-1.5 text-xs text-terminal-red font-mono focus:border-terminal-accent focus:outline-none">
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-terminal-muted block mb-1">Target</label>
+                        <input x-model.number="target" type="number" step="0.005"
+                               class="w-full bg-gray-800 border border-terminal-border rounded px-2 py-1.5 text-xs text-terminal-green font-mono focus:border-terminal-accent focus:outline-none">
+                    </div>
+                </div>
+                <button @click="computeRisk()"
+                        class="w-full bg-terminal-accent hover:bg-blue-600 text-white py-2 text-xs rounded font-medium transition-colors">
+                    COMPUTE RISK PROFILE
+                </button>
+            </div>
+        </div>
+
+        <!-- Risk Results -->
+        <div class="col-span-7 space-y-3">
+            <template x-if="result">
+                <div class="space-y-3">
+                    <!-- Risk Summary -->
+                    <div class="bg-terminal-card border border-terminal-border rounded-lg p-4">
+                        <span class="text-xs font-bold text-white block mb-3">Risk Summary</span>
+                        <div class="grid grid-cols-4 gap-4 text-[10px]">
+                            <div>
+                                <span class="text-terminal-muted block">Risk Ticks</span>
+                                <span class="text-lg font-bold text-terminal-red font-mono" x-text="result.risk_profile.risk_ticks"></span>
+                            </div>
+                            <div>
+                                <span class="text-terminal-muted block">Reward Ticks</span>
+                                <span class="text-lg font-bold text-terminal-green font-mono" x-text="result.risk_profile.reward_ticks"></span>
+                            </div>
+                            <div>
+                                <span class="text-terminal-muted block">R:R Ratio</span>
+                                <span class="text-lg font-bold text-white font-mono" x-text="result.risk_profile.risk_reward_ratio"></span>
+                            </div>
+                            <div>
+                                <span class="text-terminal-muted block">ATR Multiple</span>
+                                <span class="text-lg font-bold text-terminal-amber font-mono" x-text="result.atr_multiple_risk ?? '—'"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Position Sizing -->
+                    <div class="bg-terminal-card border border-terminal-border rounded-lg p-4" x-show="result.risk_profile.sizing">
+                        <span class="text-xs font-bold text-white block mb-3">Position Sizing</span>
+                        <div class="grid grid-cols-3 gap-4 text-[10px]">
+                            <div><span class="text-terminal-muted block">Base Lots</span><span class="text-white font-mono text-sm" x-text="result.risk_profile.sizing?.base_lots"></span></div>
+                            <div><span class="text-terminal-muted block">Vol-Adjusted</span><span class="text-white font-mono text-sm" x-text="result.risk_profile.sizing?.volatility_adjusted_lots"></span></div>
+                            <div><span class="text-terminal-muted block">Max Allowed</span><span class="text-white font-mono text-sm" x-text="result.risk_profile.sizing?.max_allowed_lots"></span></div>
+                            <div><span class="text-terminal-muted block">Risk/Lot</span><span class="text-white font-mono text-sm" x-text="'$'+result.risk_profile.sizing?.risk_per_lot?.toFixed(2)"></span></div>
+                            <div><span class="text-terminal-muted block">Total Risk</span><span class="text-terminal-red font-mono text-sm" x-text="'$'+result.risk_profile.sizing?.total_risk_usd?.toFixed(2)"></span></div>
+                            <div><span class="text-terminal-muted block">Net Risk</span><span class="text-terminal-red font-mono text-sm font-bold" x-text="'$'+result.risk_profile.sizing?.net_risk_usd?.toFixed(2)"></span></div>
+                        </div>
+                    </div>
+
+                    <!-- Warnings -->
+                    <div class="bg-terminal-card border border-terminal-border rounded-lg p-4" x-show="result.warnings?.length > 0">
+                        <span class="text-xs font-bold text-terminal-amber block mb-2">Warnings</span>
+                        <template x-for="w in result.warnings" :key="w">
+                            <p class="text-[10px] text-terminal-amber/80 py-0.5" x-text="'⚠ ' + w"></p>
+                        </template>
+                    </div>
+
+                    <!-- Ladder Plans -->
+                    <div class="grid grid-cols-3 gap-3">
+                        <template x-for="ladderType in ['entry_ladder','stop_ladder','target_ladder']" :key="ladderType">
+                            <div class="bg-terminal-card border border-terminal-border rounded-lg p-3" x-show="result.risk_profile[ladderType]">
+                                <span class="text-[10px] font-bold text-terminal-muted uppercase block mb-2" x-text="ladderType.replace('_',' ')"></span>
+                                <table class="w-full text-[9px] font-mono">
+                                    <thead><tr class="text-terminal-muted"><th class="text-left py-0.5">Lvl</th><th class="text-right">Price</th><th class="text-right">Lots</th><th class="text-right">PnL</th></tr></thead>
+                                    <tbody>
+                                        <template x-for="lvl in result.risk_profile[ladderType]?.levels ?? []" :key="lvl.level_num">
+                                            <tr class="border-t border-terminal-border/50">
+                                                <td class="py-0.5 text-white" x-text="lvl.level_num"></td>
+                                                <td class="text-right text-white" x-text="lvl.price.toFixed(4)"></td>
+                                                <td class="text-right text-white" x-text="lvl.lots"></td>
+                                                <td class="text-right" :class="lvl.cumulative_pnl >= 0 ? 'text-terminal-green' : 'text-terminal-red'" x-text="'$'+lvl.cumulative_pnl.toFixed(0)"></td>
+                                            </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </template>
+
+            <div x-show="!result" class="bg-terminal-card border border-terminal-border rounded-lg p-8 text-center">
+                <p class="text-terminal-muted text-xs">Enter trade parameters and compute risk profile</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Account Config -->
+    <div class="mt-4 bg-terminal-card border border-terminal-border rounded-lg p-4">
+        <span class="text-xs font-bold text-white block mb-3">Account Configuration</span>
+        <div class="grid grid-cols-5 gap-3">
+            <div>
+                <label class="text-[10px] text-terminal-muted block mb-1">Max Lots</label>
+                <input x-model.number="accountConfig.max_position_lots" type="number"
+                       class="w-full bg-gray-800 border border-terminal-border rounded px-2 py-1.5 text-xs text-white font-mono focus:border-terminal-accent focus:outline-none">
+            </div>
+            <div>
+                <label class="text-[10px] text-terminal-muted block mb-1">Max Risk/Trade ($)</label>
+                <input x-model.number="accountConfig.max_risk_per_trade_usd" type="number"
+                       class="w-full bg-gray-800 border border-terminal-border rounded px-2 py-1.5 text-xs text-white font-mono focus:border-terminal-accent focus:outline-none">
+            </div>
+            <div>
+                <label class="text-[10px] text-terminal-muted block mb-1">Max Daily Risk ($)</label>
+                <input x-model.number="accountConfig.max_daily_risk_usd" type="number"
+                       class="w-full bg-gray-800 border border-terminal-border rounded px-2 py-1.5 text-xs text-white font-mono focus:border-terminal-accent focus:outline-none">
+            </div>
+            <div>
+                <label class="text-[10px] text-terminal-muted block mb-1">Slippage Ticks</label>
+                <input x-model.number="accountConfig.default_slippage_ticks" type="number"
+                       class="w-full bg-gray-800 border border-terminal-border rounded px-2 py-1.5 text-xs text-white font-mono focus:border-terminal-accent focus:outline-none">
+            </div>
+            <div class="flex items-end">
+                <button @click="saveAccountConfig()"
+                        class="w-full bg-gray-700 hover:bg-gray-600 text-white py-1.5 text-[10px] rounded font-medium transition-colors">
+                    SAVE CONFIG
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/risk.js"></script>
+{% endblock %}

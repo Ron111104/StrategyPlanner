@@ -1,0 +1,9 @@
+<tr class="border-b border-terminal-border hover:bg-gray-800/50 transition-colors">
+    <td class="px-3 py-2 text-xs font-mono font-medium text-white">{{ snap.symbol }}</td>
+    <td class="px-3 py-2 text-xs font-mono text-right">{{ "%.4f" | format(snap.last_price) }}</td>
+    <td class="px-3 py-2 text-xs font-mono text-right {% if snap.change >= 0 %}text-terminal-green{% else %}text-terminal-red{% endif %}">
+        {{ "%+.4f" | format(snap.change) }}
+    </td>
+    <td class="px-3 py-2 text-xs font-mono text-right">{{ "%.0f" | format(snap.volume) }}</td>
+    <td class="px-3 py-2 text-[10px] text-terminal-muted">{{ snap.timestamp.strftime('%H:%M:%S') if snap.timestamp else '—' }}</td>
+</tr>

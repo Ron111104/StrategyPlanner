@@ -1,0 +1,108 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<div x-data="replayApp()" x-init="init()">
+    <!-- Controls -->
+    <div class="flex flex-wrap items-center gap-3 mb-4">
+        <select x-model="selectedProduct" @change="onProductChange()"
+                class="bg-terminal-card border border-terminal-border rounded px-3 py-1.5 text-xs text-white focus:border-terminal-accent focus:outline-none">
+            {% for key, prod in products.items() %}
+            <option value="{{ key }}">{{ prod.display_name }}</option>
+            {% endfor %}
+        </select>
+
+        <select x-model="selectedSymbol"
+                class="bg-terminal-card border border-terminal-border rounded px-3 py-1.5 text-xs text-white font-mono focus:border-terminal-accent focus:outline-none">
+            <template x-for="s in availableSymbols" :key="s">
+                <option :value="s" x-text="s"></option>
+            </template>
+        </select>
+
+        <select x-model="selectedTimeframe"
+                class="bg-terminal-card border border-terminal-border rounded px-2 py-1.5 text-xs text-white focus:border-terminal-accent focus:outline-none">
+            <option value="1M">1M</option>
+            <option value="5M">5M</option>
+            <option value="15M">15M</option>
+            <option value="1H">1H</option>
+            <option value="4H">4H</option>
+            <option value="1D">1D</option>
+        </select>
+
+        <div class="flex items-center gap-2 ml-4">
+            <button @click="loadData()"
+                    class="bg-terminal-accent hover:bg-blue-600 text-white px-3 py-1.5 text-[10px] rounded font-medium">LOAD</button>
+            <button @click="replayPrev()" :disabled="replayIdx <= 0"
+                    class="bg-terminal-card border border-terminal-border text-white px-2 py-1.5 text-[10px] rounded disabled:opacity-30">&#9664;</button>
+            <button @click="togglePlay()"
+                    class="px-3 py-1.5 text-[10px] rounded font-medium transition-colors"
+                    :class="playing ? 'bg-terminal-red text-white' : 'bg-terminal-green/20 text-terminal-green border border-terminal-green/30'">
+                <span x-text="playing ? 'PAUSE' : 'PLAY'"></span>
+            </button>
+            <button @click="replayNext()" :disabled="replayIdx >= totalBars - 1"
+                    class="bg-terminal-card border border-terminal-border text-white px-2 py-1.5 text-[10px] rounded disabled:opacity-30">&#9654;</button>
+            <select x-model.number="speed" class="bg-terminal-card border border-terminal-border rounded px-2 py-1.5 text-[10px] text-white focus:outline-none">
+                <option value="100">Fast</option>
+                <option value="500">Normal</option>
+                <option value="1000">Slow</option>
+                <option value="2000">Very Slow</option>
+            </select>
+        </div>
+
+        <div class="ml-auto text-[10px] font-mono text-terminal-muted">
+            Bar <span class="text-white" x-text="replayIdx + 1"></span> / <span x-text="totalBars"></span>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-12 gap-3">
+        <!-- Replay Chart -->
+        <div class="col-span-8 bg-terminal-card border border-terminal-border rounded-lg">
+            <div class="px-3 py-2 border-b border-terminal-border flex items-center gap-2">
+                <span class="text-xs font-bold text-white font-mono" x-text="selectedSymbol"></span>
+                <span class="text-[10px] text-terminal-muted">Replay Mode</span>
+                <span class="text-[10px] text-terminal-amber font-mono ml-auto" x-text="currentTimestamp"></span>
+            </div>
+            <div id="replay-chart" class="w-full" style="height:450px;"></div>
+        </div>
+
+        <!-- Replay Info Panel -->
+        <div class="col-span-4 space-y-3">
+            <!-- Current Bar -->
+            <div class="bg-terminal-card border border-terminal-border rounded-lg p-3">
+                <span class="text-[10px] font-bold text-terminal-muted uppercase tracking-widest block mb-2">Current Bar</span>
+                <div class="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                    <div><span class="text-terminal-muted block">Open</span><span class="text-white" x-text="currentBar?.open?.toFixed(4) ?? '—'"></span></div>
+                    <div><span class="text-terminal-muted block">High</span><span class="text-white" x-text="currentBar?.high?.toFixed(4) ?? '—'"></span></div>
+                    <div><span class="text-terminal-muted block">Low</span><span class="text-white" x-text="currentBar?.low?.toFixed(4) ?? '—'"></span></div>
+                    <div><span class="text-terminal-muted block">Close</span><span class="text-white font-bold" x-text="currentBar?.close?.toFixed(4) ?? '—'"></span></div>
+                    <div><span class="text-terminal-muted block">Volume</span><span class="text-white" x-text="currentBar?.volume?.toFixed(0) ?? '—'"></span></div>
+                    <div><span class="text-terminal-muted block">Change</span>
+                        <span :class="barChange >= 0 ? 'text-terminal-green' : 'text-terminal-red'" x-text="(barChange >= 0 ? '+' : '') + barChange.toFixed(4)"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Replay Progress -->
+            <div class="bg-terminal-card border border-terminal-border rounded-lg p-3">
+                <span class="text-[10px] font-bold text-terminal-muted uppercase tracking-widest block mb-2">Progress</span>
+                <div class="w-full bg-gray-800 rounded-full h-1.5 mb-2">
+                    <div class="bg-terminal-accent h-1.5 rounded-full transition-all" :style="'width:' + progressPct + '%'"></div>
+                </div>
+                <input type="range" min="0" :max="totalBars - 1" x-model.number="replayIdx" @input="seekTo(replayIdx)"
+                       class="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer">
+            </div>
+
+            <!-- Scenario Notes -->
+            <div class="bg-terminal-card border border-terminal-border rounded-lg p-3">
+                <span class="text-[10px] font-bold text-terminal-muted uppercase tracking-widest block mb-2">Scenario Notes</span>
+                <textarea x-model="notes" rows="4" placeholder="Document observations, thesis, key levels..."
+                          class="w-full bg-gray-800 border border-terminal-border rounded px-2 py-1.5 text-[10px] text-white focus:border-terminal-accent focus:outline-none resize-none"></textarea>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/charts.js"></script>
+<script src="/static/js/replay.js"></script>
+{% endblock %}
