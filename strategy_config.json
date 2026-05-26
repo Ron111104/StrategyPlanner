@@ -1,0 +1,40 @@
+{
+  "outrights": ["FFN26", "FFQ26", "FFU26", "FFZ26", "FFG27", "FFJ27"],
+  "spreads": [
+    {"name": "FFN26-FFQ26", "leg1": "FFN26", "leg2": "FFQ26"},
+    {"name": "FFQ26-FFU26", "leg1": "FFQ26", "leg2": "FFU26"},
+    {"name": "FFG27-FFJ27", "leg1": "FFG27", "leg2": "FFJ27"}
+  ],
+  "butterflies": [
+    {"name": "FFN26-Q26-U26", "front": "FFN26", "belly": "FFQ26", "back": "FFU26"}
+  ],
+  "timeframes": ["5M", "15M", "1H", "4H", "1D"],
+  "strategies": ["mean_reversion", "continuation", "acceptance_break", "failed_move", "relative_value"],
+  "tick_size": 0.005,
+  "tick_value": 20.835,
+  "contract_multiplier": 4167,
+  "max_position_lots": 10,
+  "ladder": {
+    "max_entry_levels": 5,
+    "max_exit_levels": 4,
+    "min_spacing_ticks": 1,
+    "max_spacing_ticks": 20,
+    "size_profiles": {
+      "probe":        [1],
+      "scale_in":     [1, 2, 3],
+      "pyramid":      [3, 2, 1],
+      "equal":        [2, 2, 2],
+      "accumulation": [1, 2, 3, 2, 1]
+    }
+  },
+  "cross_contract": {
+    "neighbors": {
+      "FFN26": ["FFQ26", "FFU26"],
+      "FFQ26": ["FFN26", "FFU26"],
+      "FFU26": ["FFQ26", "FFZ26"],
+      "FFZ26": ["FFU26", "FFG27"],
+      "FFG27": ["FFZ26", "FFJ27"],
+      "FFJ27": ["FFG27"]
+    }
+  }
+}

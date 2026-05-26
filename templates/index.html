@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FF Strategy Planner V2</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    darkMode: 'class',
+    theme: { extend: { colors: {
+      surface: '#0f1117', card: '#161b22', border: '#30363d',
+      accent: '#58a6ff', green: '#3fb950', red: '#f85149',
+      yellow: '#d29922', muted: '#8b949e'
+    }}}
+  }
+</script>
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  body { background: #0f1117; color: #e6edf3; font-family: 'Segoe UI', system-ui, sans-serif; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; }
+  .btn { cursor: pointer; border-radius: 6px; padding: 6px 14px; font-size: 13px; font-weight: 500; transition: all .15s; }
+  .btn-primary { background: #1f6feb; color: #fff; border: 1px solid #388bfd; }
+  .btn-primary:hover { background: #388bfd; }
+  .btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+  .btn-secondary:hover { background: #30363d; }
+  select, input { background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+    color: #e6edf3; padding: 5px 10px; font-size: 13px; outline: none; }
+  select:focus, input:focus { border-color: #58a6ff; }
+  .tab { cursor: pointer; padding: 6px 16px; font-size: 13px; border-bottom: 2px solid transparent; }
+  .tab.active { border-bottom-color: #58a6ff; color: #58a6ff; }
+  .ladder-row { display: grid; grid-template-columns: 80px 1fr 50px 60px; align-items: center;
+    padding: 6px 10px; border-radius: 4px; font-size: 12px; font-family: monospace; margin: 2px 0; gap: 8px; }
+  .entry-row   { background: #1c2b1c; border-left: 3px solid #3fb950; }
+  .exit-row    { background: #162032; border-left: 3px solid #58a6ff; }
+  .stop-row    { background: #2b1c1c; border-left: 3px solid #f85149; }
+  .current-row { background: #1f2937; border-left: 3px solid #d29922; }
+  .comp-bar { height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; }
+  .comp-fill { height: 100%; border-radius: 3px; transition: width .3s; }
+  #chart { width: 100%; height: 420px; }
+  .spinner { border: 2px solid #30363d; border-top-color: #58a6ff; border-radius: 50%;
+    width: 20px; height: 20px; animation: spin .7s linear infinite; display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .eq-chart { width: 100%; height: 180px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge-green { background: rgba(63,185,80,0.15); color: #3fb950; }
+  .badge-red { background: rgba(248,81,73,0.15); color: #f85149; }
+  .badge-blue { background: rgba(88,166,255,0.15); color: #58a6ff; }
+  .badge-yellow { background: rgba(210,153,34,0.15); color: #d29922; }
+  .metric-card { text-align: center; padding: 12px 8px; }
+  .metric-val { font-size: 20px; font-weight: 700; }
+  .metric-label { font-size: 11px; color: #8b949e; margin-top: 2px; }
+  .thesis-box { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 12px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="flex items-center justify-between px-5 py-3 border-b border-[#30363d]">
+  <div class="flex items-center gap-3">
+    <span class="text-lg font-bold text-white">FF Strategy Planner</span>
+    <span class="badge badge-blue">V2</span>
+    <span class="text-xs text-[#8b949e]">Institutional STIR</span>
+  </div>
+  <div id="statusBar" class="text-xs text-[#8b949e]">Ready</div>
+</div>
+
+<!-- MAIN LAYOUT -->
+<div class="flex h-[calc(100vh-52px)] overflow-hidden">
+
+  <!-- SIDEBAR -->
+  <div class="w-60 flex-shrink-0 border-r border-[#30363d] overflow-y-auto p-4 flex flex-col gap-3">
+
+    <div>
+      <label class="text-xs text-[#8b949e] block mb-1">Contract</label>
+      <select id="selProduct" class="w-full">
+        {% for c in config.outrights %}
+        <option value="{{ c }}">{{ c }}</option>
+        {% endfor %}
+        {% for s in config.spreads %}
+        <option value="{{ s.name }}">{{ s.name }} (spread)</option>
+        {% endfor %}
+        {% for b in config.butterflies %}
+        <option value="{{ b.name }}">{{ b.name }} (fly)</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div>
+      <label class="text-xs text-[#8b949e] block mb-1">Timeframe</label>
+      <select id="selTF" class="w-full">
+        {% for tf in config.timeframes %}
+        <option value="{{ tf }}" {% if tf == '1D' %}selected{% endif %}>{{ tf }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div>
+      <label class="text-xs text-[#8b949e] block mb-1">Strategy</label>
+      <select id="selStrategy" class="w-full">
+        <option value="auto">Auto (detect)</option>
+        {% for s in config.strategies %}
+        <option value="{{ s }}">{{ s }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div>
+      <label class="text-xs text-[#8b949e] block mb-1">Risk ($)</label>
+      <input type="number" id="inpRisk" value="500" min="50" step="50" class="w-full" />
+    </div>
+
+    <button id="btnGenerate" class="btn btn-primary w-full mt-1">Generate Plan</button>
+    <button id="btnChart"    class="btn btn-secondary w-full">Load Chart</button>
+    <button id="btnBacktest" class="btn btn-secondary w-full">Run Backtest</button>
+
+    <div class="card p-3 mt-2">
+      <div class="text-xs text-[#8b949e] mb-2 font-medium">Chart Overlays</div>
+      <label class="flex items-center gap-2 text-xs mb-1"><input type="checkbox" id="togVwap" checked class="accent-blue-500"> VWAP</label>
+      <label class="flex items-center gap-2 text-xs mb-1"><input type="checkbox" id="togEma"  checked class="accent-blue-500"> EMA 9/21</label>
+      <label class="flex items-center gap-2 text-xs mb-1"><input type="checkbox" id="togBB"   checked class="accent-blue-500"> Bollinger</label>
+      <label class="flex items-center gap-2 text-xs mb-1"><input type="checkbox" id="togSMA"  class="accent-blue-500"> SMA 20/50</label>
+    </div>
+  </div>
+
+  <!-- MAIN CONTENT -->
+  <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+
+    <!-- TABS -->
+    <div class="flex gap-0 border-b border-[#30363d]">
+      <div class="tab active" data-tab="plan">Plan</div>
+      <div class="tab" data-tab="chart">Chart</div>
+      <div class="tab" data-tab="backtest">Backtest</div>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- TAB: PLAN (V2) -->
+    <!-- ============================================================= -->
+    <div id="tab-plan" class="tab-content flex flex-col gap-4">
+
+      <!-- Top Banner: Trade Thesis + Execution Quality -->
+      <div id="planBanner" class="card p-4 hidden">
+        <div class="flex items-start justify-between gap-4">
+          <div class="flex-1">
+            <div class="flex items-center gap-2 mb-2">
+              <span id="planTradeType" class="badge badge-blue"></span>
+              <span id="planStrategy" class="badge badge-yellow"></span>
+              <span id="planDirection" class="badge"></span>
+            </div>
+            <div id="planThesis" class="thesis-box mb-2"></div>
+            <div class="flex gap-4 text-xs text-[#8b949e] mt-2">
+              <span>Product: <strong id="planProduct" class="text-white"></strong></span>
+              <span>TF: <strong id="planTF" class="text-white"></strong></span>
+              <span>Exec State: <strong id="planExecState" class="text-white"></strong></span>
+            </div>
+          </div>
+          <div class="text-center min-w-[100px]">
+            <div class="text-xs text-[#8b949e] mb-1">Execution Quality</div>
+            <div id="planQuality" class="text-3xl font-bold"></div>
+            <div class="comp-bar mt-2" style="width:100px">
+              <div id="planQualityBar" class="comp-fill" style="width:0%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Two-column: Entry Ladder + Exit Ladder -->
+      <div class="grid grid-cols-2 gap-4">
+        <div class="card p-4">
+          <div class="text-sm font-medium mb-3 text-[#8b949e]">ENTRY LADDER</div>
+          <div class="text-[10px] text-[#8b949e] mb-2 grid grid-cols-4 gap-2 px-2" style="grid-template-columns:80px 1fr 50px 60px">
+            <span>Level</span><span>Size</span><span>Conf</span><span>Reason</span>
+          </div>
+          <div id="entryLadder" class="flex flex-col gap-0">
+            <div class="text-xs text-[#8b949e] px-2">Generate a plan</div>
+          </div>
+        </div>
+        <div class="card p-4">
+          <div class="text-sm font-medium mb-3 text-[#8b949e]">EXIT LADDER</div>
+          <div class="text-[10px] text-[#8b949e] mb-2 grid grid-cols-4 gap-2 px-2" style="grid-template-columns:80px 1fr 50px 60px">
+            <span>Level</span><span>Size</span><span></span><span>Reason</span>
+          </div>
+          <div id="exitLadder" class="flex flex-col gap-0">
+            <div class="text-xs text-[#8b949e] px-2">Generate a plan</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Risk + Cross Contract -->
+      <div class="grid grid-cols-2 gap-4">
+        <!-- Risk Panel -->
+        <div class="card p-4">
+          <div class="text-sm font-medium mb-3 text-[#8b949e]">RISK</div>
+          <div id="riskPanel" class="grid grid-cols-2 gap-2 text-xs"></div>
+        </div>
+        <!-- Cross Contract -->
+        <div class="card p-4">
+          <div class="text-sm font-medium mb-3 text-[#8b949e]">CROSS CONTRACT CONTEXT</div>
+          <div id="crossPanel" class="text-xs space-y-2"></div>
+        </div>
+      </div>
+
+      <!-- Execution Notes -->
+      <div class="card p-4">
+        <div class="text-sm font-medium mb-2 text-[#8b949e]">EXECUTION NOTES</div>
+        <div id="execNotes" class="grid grid-cols-2 gap-4 text-xs"></div>
+      </div>
+
+      <!-- Confidence Factors -->
+      <div class="card p-4">
+        <div class="text-sm font-medium mb-3 text-[#8b949e]">CONFIDENCE FACTORS</div>
+        <div id="confFactors" class="grid grid-cols-3 gap-3"></div>
+      </div>
+
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- TAB: CHART -->
+    <!-- ============================================================= -->
+    <div id="tab-chart" class="tab-content hidden flex flex-col gap-4">
+      <div class="card p-3">
+        <div id="chart"></div>
+      </div>
+      <div class="card p-3">
+        <div class="text-xs text-[#8b949e] mb-2">RSI (14)</div>
+        <div id="rsiChart" style="width:100%;height:100px;"></div>
+      </div>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- TAB: BACKTEST (V2) -->
+    <!-- ============================================================= -->
+    <div id="tab-backtest" class="tab-content hidden flex flex-col gap-4">
+
+      <!-- Row 1: Primary metrics -->
+      <div class="grid grid-cols-5 gap-3">
+        <div class="card metric-card">
+          <div id="btTotal" class="metric-val">—</div>
+          <div class="metric-label">Trades</div>
+        </div>
+        <div class="card metric-card">
+          <div id="btWinRate" class="metric-val text-green-400">—</div>
+          <div class="metric-label">Win Rate</div>
+        </div>
+        <div class="card metric-card">
+          <div id="btPF" class="metric-val text-blue-400">—</div>
+          <div class="metric-label">Profit Factor</div>
+        </div>
+        <div class="card metric-card">
+          <div id="btSharpe" class="metric-val text-yellow-400">—</div>
+          <div class="metric-label">Sharpe</div>
+        </div>
+        <div class="card metric-card">
+          <div id="btDD" class="metric-val text-red-400">—</div>
+          <div class="metric-label">Max DD ($)</div>
+        </div>
+      </div>
+
+      <!-- Row 2: Secondary metrics -->
+      <div class="grid grid-cols-5 gap-3">
+        <div class="card metric-card">
+          <div id="btExpectancy" class="metric-val text-green-300">—</div>
+          <div class="metric-label">Expectancy ($)</div>
+        </div>
+        <div class="card metric-card">
+          <div id="btAvgHold" class="metric-val">—</div>
+          <div class="metric-label">Avg Hold (bars)</div>
+        </div>
+        <div class="card metric-card">
+          <div id="btRiskEff" class="metric-val text-blue-300">—</div>
+          <div class="metric-label">Risk Efficiency</div>
+        </div>
+        <div class="card metric-card">
+          <div id="btLadderEff" class="metric-val text-purple-400">—</div>
+          <div class="metric-label">Ladder Efficiency</div>
+        </div>
+        <div class="card metric-card">
+          <div id="btExecQual" class="metric-val text-yellow-300">—</div>
+          <div class="metric-label">Exec Quality</div>
+        </div>
+      </div>
+
+      <!-- Equity + Drawdown -->
+      <div class="grid grid-cols-2 gap-4">
+        <div class="card p-4">
+          <div class="text-xs text-[#8b949e] mb-2">Equity Curve</div>
+          <canvas id="eqCanvas" class="eq-chart"></canvas>
+        </div>
+        <div class="card p-4">
+          <div class="text-xs text-[#8b949e] mb-2">Drawdown</div>
+          <canvas id="ddCanvas" class="eq-chart"></canvas>
+        </div>
+      </div>
+
+      <!-- MAE/MFE -->
+      <div class="grid grid-cols-2 gap-4">
+        <div class="card p-4">
+          <div class="text-xs text-[#8b949e] mb-2">Avg MAE: <span id="btMAE" class="text-red-400">—</span> ticks | Avg MFE: <span id="btMFE" class="text-green-400">—</span> ticks</div>
+        </div>
+        <div class="card p-4">
+          <div class="text-xs text-[#8b949e] mb-2">Total P&L: <span id="btTotalPnl" class="text-white font-bold">—</span></div>
+        </div>
+      </div>
+
+      <!-- Trade Log -->
+      <div class="card p-4">
+        <div class="text-xs text-[#8b949e] mb-3">Trade Log</div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs">
+            <thead><tr class="text-[#8b949e] border-b border-[#30363d]">
+              <th class="text-left py-1 pr-3">Bar</th>
+              <th class="text-left py-1 pr-3">Dir</th>
+              <th class="text-left py-1 pr-3">Strategy</th>
+              <th class="text-right py-1 pr-3">Entry</th>
+              <th class="text-right py-1 pr-3">P&L $</th>
+              <th class="text-right py-1 pr-3">Ticks</th>
+              <th class="text-right py-1 pr-3">MAE</th>
+              <th class="text-right py-1 pr-3">MFE</th>
+              <th class="text-right py-1 pr-3">Ladder%</th>
+              <th class="text-right py-1">Result</th>
+            </tr></thead>
+            <tbody id="btTradeLog"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
